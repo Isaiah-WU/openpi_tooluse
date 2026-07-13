@@ -25,7 +25,7 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import tensorflow_datasets as tfds
 import tyro
 
-REPO_NAME = "your_hf_username/libero"  # Name of the output dataset, also used for the Hugging Face Hub
+REPO_NAME = "wbjsamuel/ur10e_demo"   # 改成和 repo_id 一致  # Name of the output dataset, also used for the Hugging Face Hub
 RAW_DATASET_NAMES = [
     "libero_10_no_noops",
     "libero_goal_no_noops",
@@ -44,9 +44,9 @@ def main(data_dir: str, *, push_to_hub: bool = False):
     # OpenPi assumes that proprio is stored in `state` and actions in `action`
     # LeRobot assumes that dtype of image data is `image`
     dataset = LeRobotDataset.create(
-        repo_id=REPO_NAME,
-        robot_type="panda",
-        fps=10,
+        repo_id="wbjsamuel/ur10e_demo",
+        robot_type="ur10e",
+        fps=30,
         features={
             "image": {
                 "dtype": "image",
@@ -60,7 +60,7 @@ def main(data_dir: str, *, push_to_hub: bool = False):
             },
             "state": {
                 "dtype": "float32",
-                "shape": (8,),
+                "shape": (7,),
                 "names": ["state"],
             },
             "actions": {
@@ -75,26 +75,28 @@ def main(data_dir: str, *, push_to_hub: bool = False):
 
     # Loop over raw Libero datasets and write episodes to the LeRobot dataset
     # You can modify this for your own data format
-    for raw_dataset_name in RAW_DATASET_NAMES:
-        raw_dataset = tfds.load(raw_dataset_name, data_dir=data_dir, split="train")
-        for episode in raw_dataset:
-            for step in episode["steps"].as_numpy_iterator():
-                dataset.add_frame(
-                    {
-                        "image": step["observation"]["image"],
-                        "wrist_image": step["observation"]["wrist_image"],
-                        "state": step["observation"]["state"],
-                        "actions": step["action"],
-                        "task": step["language_instruction"].decode(),
-                    }
-                )
-            dataset.save_episode()
+    # 举例：假设你的数据是存成一堆 HDF5 文件，每个文件是一次演示
+    import h5py
+    import glob
+
+    for episode_path in glob.glob(f"{data_dir}/*.hdf5"):
+        with h5py.File(episode_path, "r") as f:
+            num_steps = f["actions"].shape[0]
+            for i in range(num_steps):
+                dataset.add_frame({
+                    "image": f["observations/image"][i],
+                    "wrist_image": f["observations/wrist_image"][i],
+                    "state": f["observations/state"][i],
+                    "actions": f["actions"][i],
+                    "task": "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth",
+                })
+        dataset.save_episode()   # 缩进到这里，8 个空格，跟 with 对齐
 
     # Optionally push to the Hugging Face Hub
     if push_to_hub:
         dataset.push_to_hub(
-            tags=["libero", "panda", "rlds"],
-            private=False,
+            tags=["ur10e", "pour-water", "real-robot"],
+            private=True,
             push_videos=True,
             license="apache-2.0",
         )
