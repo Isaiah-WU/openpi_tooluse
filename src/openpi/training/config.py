@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.ur10e_policy as ur10e_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -354,6 +355,56 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotUR10eDataConfig(DataConfigFactory):
+    """
+    定义怎么处理转换好的 UR10e LeRobot 数据集,仿照 LeRobotLiberoDataConfig 改写。
+    """
+
+    extra_delta_transform: bool = False
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # repack_transform 只作用于"来自数据集"的数据,推理时不会用到。
+        # 左边是你数据集里实际的字段名(对应转换脚本 features 字典里的 key),
+        # 右边是统一喂给 UR10eInputs 的字段名,右边不要改。
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[ur10e_policy.UR10eInputs(model_type=model_config.model_type)],
+            outputs=[ur10e_policy.UR10eOutputs()],
+        )
+
+        # 如果你的 HDF5 里存的 actions 是"绝对关节角度",打开这个开关会把前 6 维
+        # (关节)转成相对上一步的增量,第 7 维(夹爪)保持绝对值不变。
+        # 如果采集时存的本来就是增量动作,保持 False。
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
 
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
@@ -674,6 +725,32 @@ _CONFIGS = [
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_ur10e",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotUR10eDataConfig(
+            repo_id="wbjsamuel/ur10e_demo",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,  # 按上面说的方法自己确认
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_ur10e_lora",
+        model=pi0_config.Pi0Config(pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotUR10eDataConfig(
+            repo_id="wbjsamuel/ur10e_demo",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,  # LoRA 微调要关掉 EMA
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
