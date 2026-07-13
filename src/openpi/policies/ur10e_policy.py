@@ -35,7 +35,6 @@ class UR10eInputs(transforms.DataTransformFn):
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(data["observation/image"])
-        wrist_image = _parse_image(data["observation/wrist_image"])
 
         # 下面字典里的 key 名（"state" / "image" / "image_mask" 等）是模型固定要求的，不要改。
         # 需要改的只是等号右边取自 data 的部分，以对应你自己数据集的字段。
@@ -43,21 +42,21 @@ class UR10eInputs(transforms.DataTransformFn):
             "state": data["observation/state"],
             "image": {
                 "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
+            # 两路腕部图像都用全零占位，而不是只占位右边这一路
+                "left_wrist_0_rgb": np.zeros_like(base_image),
                 "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
+                # 两路腕部图都是占位，mask 逻辑也要相应统一处理
+                "left_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
                 "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
             },
         }
 
-        # actions 只在训练阶段存在（推理阶段还没有动作），保留这段逻辑不用改
         if "actions" in data:
             inputs["actions"] = data["actions"]
 
-        # 把语言指令传给模型；如果你的数据里指令字段不叫 "prompt"，改这里的取值键名
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 

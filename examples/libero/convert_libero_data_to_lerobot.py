@@ -50,25 +50,22 @@ def main(data_dir: str, *, push_to_hub: bool = False):
         features={
             "image": {
                 "dtype": "image",
-                "shape": (256, 256, 3),
+                "shape": (480, 640, 3),          # 改成真实分辨率
                 "names": ["height", "width", "channel"],
-            },
-            "wrist_image": {
-                "dtype": "image",
-                "shape": (256, 256, 3),
-                "names": ["height", "width", "channel"],
-            },
-            "state": {
-                "dtype": "float32",
-                "shape": (7,),
-                "names": ["state"],
-            },
-            "actions": {
-                "dtype": "float32",
-                "shape": (7,),
-                "names": ["actions"],
-            },
         },
+        # "wrist_image" 这一整块直接删掉——你没有真实腕部相机，
+        # 不需要在数据集里存一份假的全零图像，白白占用磁盘空间
+        "state": {
+            "dtype": "float32",
+            "shape": (7,),
+            "names": ["state"],
+        },
+        "actions": {
+            "dtype": "float32",
+            "shape": (7,),
+            "names": ["actions"],
+        },
+    },
         image_writer_threads=10,
         image_writer_processes=5,
     )
@@ -81,16 +78,15 @@ def main(data_dir: str, *, push_to_hub: bool = False):
 
     for episode_path in glob.glob(f"{data_dir}/*.hdf5"):
         with h5py.File(episode_path, "r") as f:
-            num_steps = f["actions"].shape[0]
+            num_steps = f["action"].shape[0]          # 改成单数 "action"
             for i in range(num_steps):
                 dataset.add_frame({
-                    "image": f["observations/image"][i],
-                    "wrist_image": f["observations/wrist_image"][i],
-                    "state": f["observations/state"][i],
-                    "actions": f["actions"][i],
+                    "image": f["observations/rgb"][i],   # rgb，不是 image
+                    "state": f["observations/qpos"][i],   # qpos，不是 state
+                    "actions": f["action"][i],
                     "task": "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth",
                 })
-        dataset.save_episode()   # 缩进到这里，8 个空格，跟 with 对齐
+        dataset.save_episode()
 
     # Optionally push to the Hugging Face Hub
     if push_to_hub:
