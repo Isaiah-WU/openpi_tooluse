@@ -77,16 +77,35 @@ def main(data_dir: str, *, push_to_hub: bool = False):
     import glob
 
     for episode_path in glob.glob(f"{data_dir}/*.hdf5"):
-        with h5py.File(episode_path, "r") as f:
-            num_steps = f["actions"].shape[0]          
-            for i in range(num_steps):
-                dataset.add_frame({
-                    "image": f["observations/rgb"][i],   
-                    "state": f["observations/qpos"][i],   
-                    "actions": f["actions"][i],
-                    "task": "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth",
-                })
-        dataset.save_episode()
+        try:
+            with h5py.File(episode_path, "r") as f:
+                required_keys = ["actions", "observations/rgb", "observations/qpos"]
+                if not all(key in f for key in required_keys):
+                    print(f" 警告: 跳过文件 {episode_path}，因为缺少必要的键 {required_keys}。")
+                    continue
+
+                num_steps = f["actions"].shape[0]          
+                for i in range(num_steps):
+                    dataset.add_frame({
+                        "image": f["observations/rgb"][i],   
+                        "state": f["observations/qpos"][i],   
+                        "actions": f["actions"][i],
+                        "task": "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth",
+                    })
+        
+            dataset.save_episode()
+
+        except OSError as e:
+            print(f" 警告: 跳过损坏或无法打开的文件 {episode_path}。错误信息: {e}")
+            continue
+        
+        except KeyError as e:
+            print(f" 警告: 跳过文件 {episode_path}，找不到指定的数据键。错误信息: {e}")
+            continue
+        
+        except Exception as e:
+            print(f"⚠️ 警告: 处理文件 {episode_path} 时发生未知错误，已跳过。错误信息: {e}")
+            continue
 
     # Optionally push to the Hugging Face Hub
     if push_to_hub:
