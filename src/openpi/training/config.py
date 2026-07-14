@@ -735,6 +735,8 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
+        assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
+        checkpoint_base_dir="home/wbjsamuel/projects/openpi_demo/checkpoints",
     ),
     TrainConfig(
         name="pi05_ur10e_lora",
@@ -746,6 +748,8 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
+        assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
+        checkpoint_base_dir="home/wbjsamuel/projects/openpi_demo/checkpoints",
         freeze_filter=pi0_config.Pi0Config(
             pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
