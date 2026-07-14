@@ -104,7 +104,7 @@ def main(data_dir: str, *, push_to_hub: bool = False):
             continue
         
         except Exception as e:
-            print(f"⚠️ 警告: 处理文件 {episode_path} 时发生未知错误，已跳过。错误信息: {e}")
+            print(f" 警告: 处理文件 {episode_path} 时发生未知错误，已跳过。错误信息: {e}")
             continue
 
     # Optionally push to the Hugging Face Hub

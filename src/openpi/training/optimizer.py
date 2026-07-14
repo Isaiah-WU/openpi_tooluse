@@ -72,6 +72,7 @@ class AdamW(OptimizerConfig):
     # Changing this to 0 can cause out-of-memory errors for some reason, so we set it to a negligible value.
     weight_decay: float = 1e-10
     clip_gradient_norm: float = 1.0
+    gradient_accumulation_steps: int = 1
 
     def create(
         self,
@@ -81,6 +82,10 @@ class AdamW(OptimizerConfig):
         tx = optax.adamw(
             lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
         )
+
+        # 新增这几行：如果设置了累积步数 > 1，用 MultiSteps 包一层
+        if self.gradient_accumulation_steps > 1:
+            tx = optax.MultiSteps(tx, every_k_schedule=self.gradient_accumulation_steps)
 
         return optax.chain(optax.clip_by_global_norm(self.clip_gradient_norm), tx)
 
