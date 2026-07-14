@@ -78,12 +78,12 @@ def main(data_dir: str, *, push_to_hub: bool = False):
 
     for episode_path in glob.glob(f"{data_dir}/*.hdf5"):
         with h5py.File(episode_path, "r") as f:
-            num_steps = f["action"].shape[0]          # 改成单数 "action"
+            num_steps = f["actions"].shape[0]          
             for i in range(num_steps):
                 dataset.add_frame({
-                    "image": f["observations/rgb"][i],   # rgb，不是 image
-                    "state": f["observations/qpos"][i],   # qpos，不是 state
-                    "actions": f["action"][i],
+                    "image": f["observations/rgb"][i],   
+                    "state": f["observations/qpos"][i],   
+                    "actions": f["actions"][i],
                     "task": "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth",
                 })
         dataset.save_episode()
