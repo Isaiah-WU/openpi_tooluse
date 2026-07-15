@@ -562,6 +562,8 @@ class TrainConfig:
 
     # How often (in steps) to log training metrics.
     log_interval: int = 100
+    # How often (in steps) to log sample images to W&B.
+    image_log_interval: int = 1000 
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
@@ -768,6 +770,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
         batch_size=32,
+        image_log_interval=1500,
         assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
         checkpoint_base_dir="/home/wbjsamuel/projects/openpi_demo/checkpoints",
         freeze_filter=pi0_config.Pi0Config(

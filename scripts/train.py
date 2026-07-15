@@ -267,6 +267,12 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+        if step % config.image_log_interval == 0:
+            images_to_log = [
+                wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+                for i in range(min(5, len(next(iter(batch[0].images.values())))))
+            ]
+            wandb.log({"camera_views": images_to_log}, step=step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
