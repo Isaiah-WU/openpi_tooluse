@@ -731,7 +731,7 @@ _CONFIGS = [
         data=LeRobotUR10eDataConfig(
             repo_id="wbjsamuel/ur10e_demo",
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,  # 按上面说的方法自己确认
+            extra_delta_transform=False,  
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
@@ -755,7 +755,25 @@ _CONFIGS = [
         freeze_filter=pi0_config.Pi0Config(
             pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
-        ema_decay=None,  
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_ur10e_lora_bs32",   # 建议换个新名字，不跟之前的配置混在一起
+        model=pi0_config.Pi0Config(pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotUR10eDataConfig(
+            repo_id="wbjsamuel/ur10e_demo",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+        assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
+        checkpoint_base_dir="/home/wbjsamuel/projects/openpi_demo/checkpoints",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
