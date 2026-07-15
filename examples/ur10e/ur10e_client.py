@@ -21,23 +21,19 @@ import rtde_receive
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy
 
-# ============ 按你自己的实际情况修改这几个参数 ============
+# ========================
 
-ROBOT_IP = "192.168.1.9"           # UR10e 控制柜的真实 IP（机械臂 + 夹爪共用这一个）
-GRIPPER_PORT = 63352                 # Robotiq 通过 URCap 暴露的 socket 端口，通常就是这个
-GRIPPER_MAX_POS = 255                # Robotiq 夹爪原始指令范围通常是 0~255，按实际情况调整
+ROBOT_IP = "192.168.1.9"           
+GRIPPER_PORT = 63352               
+GRIPPER_MAX_POS = 255                
 
-# 服务器（serve_policy.py）和客户端（这个脚本）都跑在同一台机器上
-# （这台机器既有 GPU 又能直连机械臂），所以用 127.0.0.1
 HOST_IP = "127.0.0.1"
-HOST_PORT = 8000                     # serve_policy.py 默认监听的端口，一般不用改
+HOST_PORT = 8000                     
 
 # ============================================================
 
 
 class RobotiqGripper:
-    """通过 URCap 暴露的 socket（默认 63352 端口）控制 Robotiq 夹爪。
-    协议是简单的文本指令，这是社区里最常用的实现方式。"""
 
     def __init__(self, robot_ip: str, port: int = GRIPPER_PORT):
         self.sock = socket.create_connection((robot_ip, port), timeout=2.0)
@@ -50,7 +46,6 @@ class RobotiqGripper:
         return self.sock.recv(1024).decode("utf-8")
 
     def move(self, pos_0_to_1: float, speed: int = 150, force: int = 100):
-        """pos_0_to_1: 0 = 全开, 1 = 全闭（跟你训练数据里 gripper 归一化的方向要对上）"""
         pos = int(np.clip(pos_0_to_1, 0.0, 1.0) * GRIPPER_MAX_POS)
         self._send(f"SET POS {pos}")
         self._send(f"SET SPE {speed}")
@@ -62,12 +57,10 @@ class RobotiqGripper:
         return pos / GRIPPER_MAX_POS
 
 
-# 全局初始化一次连接，避免每一步都重新建立连接（这几行会在 import 时立刻尝试连接机器人）
 rtde_c = rtde_control.RTDEControlInterface(ROBOT_IP)
 rtde_r = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
 gripper = RobotiqGripper(ROBOT_IP)
 
-# RealSense 相机初始化
 pipeline = rs.pipeline()
 rs_config = rs.config()
 rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
@@ -75,7 +68,6 @@ pipeline.start(rs_config)
 
 
 def get_camera_image():
-    """从 RealSense 读取一帧彩色图像，转成 (H, W, 3) 的 RGB numpy array"""
     frames = pipeline.wait_for_frames()
     color_frame = frames.get_color_frame()
     img_bgr = np.asanyarray(color_frame.get_data())

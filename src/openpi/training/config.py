@@ -758,7 +758,7 @@ _CONFIGS = [
         ema_decay=None,
     ),
     TrainConfig(
-        name="pi05_ur10e_lora_bs32",   # 建议换个新名字，不跟之前的配置混在一起
+        name="pi05_ur10e_lora_bs32",   # 
         model=pi0_config.Pi0Config(pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotUR10eDataConfig(
             repo_id="wbjsamuel/ur10e_demo",
@@ -775,6 +775,7 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+    #####
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
