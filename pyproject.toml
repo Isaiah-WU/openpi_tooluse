@@ -38,6 +38,8 @@ dependencies = [
     "transformers==4.53.2",
     "rich>=14.0.0",
     "polars>=1.30.0",
+    "pyrealsense2>=2.58.2.10647",
+    "ur-rtde>=1.6.3",
 ]
 
 
