@@ -90,7 +90,7 @@ def main(data_dir: str, *, push_to_hub: bool = False):
                         "image": f["observations/rgb"][i],   
                         "state": f["observations/qpos"][i],   
                         "actions": f["actions"][i],
-                        "task": "S",
+                        "task": "Stack the cup from the left plate into the cup on the right plate, then lift this nested pair and stack it onto the third cup standing alone on the tabletop. Transfer the complete three-cup stack into the basket. Next, stack the left plate onto the right plate, then place this stacked pair onto the plate already inside the basket, aligning their edges. Finally, take the rag from the right side of the workspace, thoroughly wipe the entire tabletop, and return the rag to its original position.",
                     })
         
             dataset.save_episode()
