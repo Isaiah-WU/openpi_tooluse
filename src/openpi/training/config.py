@@ -779,6 +779,33 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
+
+    TrainConfig(
+        name="pi05_ur10e_long_horizon_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            max_token_len=256,
+        ),
+        data=LeRobotUR10eDataConfig(
+            repo_id="wbjsamuel/ur10e_long_horizon",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,      
+        assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
+        checkpoint_base_dir="/home/wbjsamuel/projects/openpi_demo/checkpoints",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            max_token_len=256,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     #####
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
