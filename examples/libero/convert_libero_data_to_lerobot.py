@@ -25,7 +25,7 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import tensorflow_datasets as tfds
 import tyro
 
-REPO_NAME = "wbjsamuel/ur10e_demo"   # 改成和 repo_id 一致  # Name of the output dataset, also used for the Hugging Face Hub
+REPO_NAME = "wbjsamuel/ur10e_long_horizon"   # 改成和 repo_id 一致  # Name of the output dataset, also used for the Hugging Face Hub
 RAW_DATASET_NAMES = [
     "libero_10_no_noops",
     "libero_goal_no_noops",
@@ -44,7 +44,7 @@ def main(data_dir: str, *, push_to_hub: bool = False):
     # OpenPi assumes that proprio is stored in `state` and actions in `action`
     # LeRobot assumes that dtype of image data is `image`
     dataset = LeRobotDataset.create(
-        repo_id="wbjsamuel/ur10e_demo",
+        repo_id=REPO_NAME,
         robot_type="ur10e",
         fps=30,
         features={
@@ -90,7 +90,7 @@ def main(data_dir: str, *, push_to_hub: bool = False):
                         "image": f["observations/rgb"][i],   
                         "state": f["observations/qpos"][i],   
                         "actions": f["actions"][i],
-                        "task": "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth",
+                        "task": "S",
                     })
         
             dataset.save_episode()
