@@ -795,6 +795,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
+        image_log_interval=1500,
         batch_size=32,      
         assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
         checkpoint_base_dir="/home/wbjsamuel/projects/openpi_demo/checkpoints",
