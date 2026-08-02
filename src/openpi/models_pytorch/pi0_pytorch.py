@@ -29,17 +29,34 @@ def create_sinusoidal_pos_embedding(
     if dimension % 2 != 0:
         raise ValueError(f"dimension ({dimension}) must be divisible by 2")
 
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
+    if time.ndim not in (1, 2):
+        raise ValueError(
+            "The time tensor is expected to have shape "
+            "`(batch_size,)` or `(batch_size, horizon)`."
+        )
 
     dtype = get_safe_dtype(torch.float64, device.type)
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
     period = min_period * (max_period / min_period) ** fraction
 
-    # Compute the outer product
+    original_shape = time.shape
+    flat_time = time.reshape(-1).to(dtype=dtype)
+
     scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    sin_input = scaling_factor[None, :] * flat_time[:, None]
+
+    embedding = torch.cat(
+        [
+            torch.sin(sin_input),
+            torch.cos(sin_input),
+        ],
+        dim=1,
+    )
+
+    return embedding.reshape(
+        *original_shape,
+        dimension,
+    )
 
 
 def sample_beta(alpha, beta, bsize, device):
@@ -183,6 +200,95 @@ class PI0Pytorch(nn.Module):
         time_beta = sample_beta(1.5, 1.0, bsize, device)
         time = time_beta * 0.999 + 0.001
         return time.to(dtype=torch.float32, device=device)
+
+    def _sample_rtc_prefix_steps(
+        self,
+        batch_size,
+        device,
+    ):
+        """Sample one training-time RTC prefix length per batch item."""
+        rtc_config = getattr(
+            self.config,
+            "rtc_training",
+            None,
+        )
+
+        if (
+            rtc_config is None
+            or not rtc_config.enabled
+        ):
+            return None
+
+        execution_horizon = (
+            rtc_config.execution_horizon
+        )
+
+        if execution_horizon is None:
+            execution_horizon = (
+                self.config.action_horizon // 2
+            )
+
+        legal_max_prefix = (
+            self.config.action_horizon
+            - execution_horizon
+        )
+
+        if legal_max_prefix < 0:
+            raise ValueError(
+                "RTC training requires "
+                "execution_horizon <= action_horizon, "
+                f"got execution_horizon={execution_horizon}, "
+                f"action_horizon={self.config.action_horizon}"
+            )
+
+        configured_max = (
+            rtc_config.max_prefix_steps
+        )
+
+        if configured_max is None:
+            configured_max = legal_max_prefix
+
+        max_prefix_steps = min(
+            configured_max,
+            legal_max_prefix,
+        )
+
+        min_prefix_steps = min(
+            rtc_config.min_prefix_steps,
+            max_prefix_steps,
+        )
+
+        if max_prefix_steps == min_prefix_steps:
+            prefix_steps = torch.full(
+                (batch_size,),
+                max_prefix_steps,
+                dtype=torch.long,
+                device=device,
+            )
+        else:
+            prefix_steps = torch.randint(
+                min_prefix_steps,
+                max_prefix_steps + 1,
+                (batch_size,),
+                device=device,
+            )
+
+        if rtc_config.prefix_probability < 1.0:
+            use_prefix = (
+                torch.rand(
+                    (batch_size,),
+                    device=device,
+                )
+                < rtc_config.prefix_probability
+            )
+
+            prefix_steps = torch.where(
+                use_prefix,
+                prefix_steps,
+                torch.zeros_like(prefix_steps),
+            )
+
+        return prefix_steps
 
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks
@@ -328,8 +434,57 @@ class PI0Pytorch(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
+        loss_scale = None
+        model_time = time
+
+        prefix_steps = self._sample_rtc_prefix_steps(
+            actions.shape[0],
+            actions.device,
+        )
+
+        if prefix_steps is not None:
+            step_ids = torch.arange(
+                self.config.action_horizon,
+                device=actions.device,
+            )[None, :]
+
+            prefix_mask = step_ids < prefix_steps[:, None]
+            postfix_mask = ~prefix_mask
+
+            postfix_time = time[:, None].expand(
+                -1,
+                self.config.action_horizon,
+            )
+
+            model_time = torch.where(
+                prefix_mask,
+                torch.zeros_like(postfix_time),
+                postfix_time,
+            )
+
+            x_t = (
+                model_time[:, :, None] * noise
+                + (1 - model_time[:, :, None]) * actions
+            )
+
+            valid_postfix_steps = (
+                postfix_mask.sum(dim=1)
+                .clamp_min(1)
+                .to(dtype=x_t.dtype)
+            )
+
+            loss_scale = postfix_mask[:, :, None].to(
+                dtype=x_t.dtype,
+            )
+
+            loss_scale = loss_scale * (
+                self.config.action_horizon
+                / valid_postfix_steps[:, None, None]
+            )
+
+
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, model_time)
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
             == torch.bfloat16
@@ -371,7 +526,16 @@ class PI0Pytorch(nn.Module):
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        loss = F.mse_loss(
+            u_t,
+            v_t,
+            reduction="none",
+        )
+
+        if loss_scale is not None:
+            loss = loss * loss_scale
+
+        return loss
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:

@@ -20,6 +20,10 @@ import rtde_receive
 
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy
+from async_policy import AsyncPolicyProcess
+from runtime_timing import ControlCycleTiming
+from timing_recorder import TimingRecorder
+from action_trajectory import resample_action_chunk
 
 # ========================
 
@@ -57,14 +61,40 @@ class RobotiqGripper:
         return pos / GRIPPER_MAX_POS
 
 
-rtde_c = rtde_control.RTDEControlInterface(ROBOT_IP)
-rtde_r = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
-gripper = RobotiqGripper(ROBOT_IP)
+rtde_c = None
+rtde_r = None
+gripper = None
+pipeline = None
 
-pipeline = rs.pipeline()
-rs_config = rs.config()
-rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-pipeline.start(rs_config)
+
+def initialize_hardware():
+    global rtde_c
+    global rtde_r
+    global gripper
+    global pipeline
+
+    rtde_c = rtde_control.RTDEControlInterface(
+        ROBOT_IP
+    )
+    rtde_r = rtde_receive.RTDEReceiveInterface(
+        ROBOT_IP
+    )
+    gripper = RobotiqGripper(
+        ROBOT_IP
+    )
+
+    pipeline = rs.pipeline()
+
+    camera_config = rs.config()
+    camera_config.enable_stream(
+        rs.stream.color,
+        640,
+        480,
+        rs.format.bgr8,
+        30,
+    )
+
+    pipeline.start(camera_config)
 
 
 def get_camera_image():
@@ -82,6 +112,33 @@ def get_robot_state():
     return np.array(list(joints) + [gripper_pos], dtype=np.float32)
 
 
+def capture_observation(task_instruction):
+    observation_start = time.perf_counter()
+
+    img = get_camera_image()
+    state = get_robot_state()
+
+    observation = {
+        "observation/image": image_tools.convert_to_uint8(
+            image_tools.resize_with_pad(
+                img,
+                224,
+                224,
+            )
+        ),
+        "observation/state": state,
+        "prompt": task_instruction,
+    }
+
+    observation_ready = time.perf_counter()
+
+    return (
+        observation,
+        observation_start,
+        observation_ready,
+    )
+
+
 def execute_action(action):
     """action 是长度为 7 的一维数组：前 6 维是关节目标角度，第 7 维是夹爪目标位置"""
     joint_targets = action[:6].tolist()
@@ -95,8 +152,235 @@ def execute_action(action):
 # ======================================================================
 
 
+def main_async():
+    initialize_hardware()
+    task_instruction = (
+        "pour water from the kettle into the cup, "
+        "then move the cup away and wipe the table with the cloth"
+    )
+
+    num_steps = 200
+    query_every_n_steps = 10
+
+    policy_action_hz = 30.0
+    control_hz = 10.0
+    control_period_s = 1.0 / control_hz
+
+    policy = AsyncPolicyProcess(
+        remote_host=HOST_IP,
+        remote_port=HOST_PORT,
+        fake_delay_ms=None,
+        action_horizon=50,
+        action_dim=7,
+    )
+
+    recorder = TimingRecorder(
+        "ur10e_timing",
+    )
+
+    action_chunk = None
+    chunk_index = 0
+    next_query_step = 0
+    action_chunk_timing = None
+    last_action = None
+
+    policy.start()
+
+    try:
+        next_cycle_deadline = time.perf_counter()
+
+        for step in range(num_steps):
+            cycle = ControlCycleTiming(
+                control_step=step,
+                cycle_start=time.perf_counter(),
+            )
+
+            response = policy.poll()
+
+            if response is not None:
+                returned_timing = response.get(
+                    "timing",
+                )
+
+                if not response["ok"]:
+                    if returned_timing is not None:
+                        recorder.record_request(
+                            returned_timing,
+                        )
+
+                    raise RuntimeError(
+                        response["error"]
+                    )
+
+                returned_timing.chunk_prepare_start = (
+                    time.perf_counter()
+                )
+
+                new_chunk = np.asarray(
+                    response["actions"],
+                    dtype=np.float32,
+                )
+
+                if (
+                    new_chunk.ndim != 2
+                    or new_chunk.shape[0] == 0
+                    or new_chunk.shape[1] != 7
+                ):
+                    raise ValueError(
+                        "Policy actions must have "
+                        f"shape (H, 7), got {new_chunk.shape}"
+                    )
+
+                new_chunk = resample_action_chunk(
+                    new_chunk,
+                    source_hz=policy_action_hz,
+                    target_hz=control_hz,
+                )
+
+                returned_timing.chunk_prepare_end = (
+                    time.perf_counter()
+                )
+
+                action_chunk = new_chunk
+                chunk_index = 0
+                action_chunk_timing = returned_timing
+
+                returned_timing.accept_step = step
+                returned_timing.chunk_accept = (
+                    time.perf_counter()
+                )
+
+                recorder.record_request(
+                    returned_timing,
+                )
+
+            if (
+                not policy.inflight
+                and step >= next_query_step
+            ):
+                (
+                    observation,
+                    observation_start,
+                    observation_ready,
+                ) = capture_observation(
+                    task_instruction,
+                )
+
+                submitted_timing = policy.submit(
+                    observation,
+                    observation_step=step,
+                    submit_step=step,
+                    observation_start=observation_start,
+                    observation_ready=observation_ready,
+                )
+
+                recorder.record_request(
+                    submitted_timing,
+                )
+
+                next_query_step = (
+                    step + query_every_n_steps
+                )
+
+            if (
+                action_chunk is not None
+                and chunk_index < len(action_chunk)
+            ):
+                if action_chunk_timing is None:
+                    raise RuntimeError(
+                        "Action chunk has no request timing"
+                    )
+
+                action = action_chunk[chunk_index]
+
+                cycle.request_id = (
+                    action_chunk_timing.request_id
+                )
+                cycle.action_index = chunk_index
+                cycle.action_source = (
+                    "new_chunk"
+                    if chunk_index == 0
+                    else "current_chunk"
+                )
+
+                action_start = time.perf_counter()
+                cycle.execute_action_start = action_start
+
+                if chunk_index == 0:
+                    action_chunk_timing.first_action_start = (
+                        action_start
+                    )
+
+                execute_action(action)
+
+                last_action = action.copy()
+
+                action_end = time.perf_counter()
+                cycle.execute_action_end = action_end
+
+                if chunk_index == 0:
+                    action_chunk_timing.first_action_end = (
+                        action_end
+                    )
+                    recorder.record_request(
+                        action_chunk_timing,
+                    )
+
+                chunk_index += 1
+
+            elif last_action is not None:
+                cycle.request_id = (
+                    action_chunk_timing.request_id
+                    if action_chunk_timing is not None
+                    else None
+                )
+                cycle.action_index = max(
+                    0,
+                    chunk_index - 1,
+                )
+                cycle.action_source = "hold_last"
+
+                cycle.execute_action_start = (
+                    time.perf_counter()
+                )
+
+                execute_action(last_action)
+
+                cycle.execute_action_end = (
+                    time.perf_counter()
+                )
+
+            else:
+                cycle.action_source = (
+                    "waiting_for_first_chunk"
+                )
+
+            next_cycle_deadline += (
+                control_period_s
+            )
+
+            now = time.perf_counter()
+            sleep_s = (
+                next_cycle_deadline - now
+            )
+
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            else:
+                next_cycle_deadline = now
+
+            cycle.cycle_end = time.perf_counter()
+            recorder.record_cycle(cycle)
+
+    finally:
+        policy.stop()
+        recorder.save()
+        recorder.print_summary()
+
+
 def main():
     # host/port 已经在文件顶部的 HOST_IP / HOST_PORT 里配置，这里直接引用，不用改这一行
+    initialize_hardware()
     client = websocket_client_policy.WebsocketClientPolicy(host=HOST_IP, port=HOST_PORT)
 
     task_instruction = "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth"
@@ -109,17 +393,11 @@ def main():
     for step in range(num_steps):
         # 每隔 N 步，或者还没有可用的动作块时，才重新查询服务器
         if action_chunk is None or step % query_every_n_steps == 0:
-            img = get_camera_image()
-            state = get_robot_state()
-
-            observation = {
-                # resize_with_pad + convert_to_uint8：跟训练时的预处理方式对齐，官方推荐这么写
-                "observation/image": image_tools.convert_to_uint8(
-                    image_tools.resize_with_pad(img, 224, 224)
-                ),
-                "observation/state": state,   # 不需要自己归一化，服务器端会自动处理
-                "prompt": task_instruction,
-            }
+            (
+                observation,
+                observation_start,
+                observation_ready,
+            ) = capture_observation(task_instruction)
 
             result = client.infer(observation)
             action_chunk = result["actions"]   # 形状是 (action_horizon, 7)
