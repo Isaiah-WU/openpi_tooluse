@@ -58,7 +58,11 @@ class WebsocketPolicyServer:
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                # Run inference in a worker thread so it doesn't block the event loop --
+                # otherwise this single call would stall every other connection (and any
+                # pipelined prefetch request from this same client) for the duration of
+                # the GPU/model forward pass.
+                action = await asyncio.to_thread(self._policy.infer, obs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {

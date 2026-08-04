@@ -10,6 +10,7 @@ UR10e 客户端：从策略服务器获取动作，并在真实机器人上执�
 5. 确认示教器上装了 Robotiq 的 URCap 插件（socket 端口默认 63352）
 """
 
+import logging
 import socket
 import time
 
@@ -18,19 +19,44 @@ import pyrealsense2 as rs
 import rtde_control
 import rtde_receive
 
+from openpi_client import action_chunk_broker
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy
 
 # ========================
 
-ROBOT_IP = "192.168.1.9"           
-GRIPPER_PORT = 63352               
-GRIPPER_MAX_POS = 255                
+ROBOT_IP = "192.168.1.9"
+GRIPPER_PORT = 63352
+GRIPPER_MAX_POS = 255
 
 HOST_IP = "127.0.0.1"
-HOST_PORT = 8000                     
+HOST_PORT = 8000
 
 # ============================================================
+
+# 每个 checkpoint 训练时用的语言指令(必须和 config.py 里对应 TrainConfig 的数据集
+# 转换脚本里写死的 "task" 字段完全一致,否则模型收到的指令和它训练时学到的对不上,
+# 会直接导致输出动作不相关/错误 —— 这曾经是导致成功率异常低的一个真实 bug,不要再
+# 把 prompt 写死成任意一句话,而是从这里按 checkpoint 名字挑)。
+CHECKPOINT_PROMPTS = {
+    # config.py: pi05_ur10e / pi05_ur10e_lora / pi05_ur10e_lora_bs32
+    # 数据集: wbjsamuel/ur10e_demo
+    "pi05_ur10e_demo": (
+        "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth"
+    ),
+    # config.py: pi05_ur10e_long_horizon_lora
+    # 数据集: wbjsamuel/ur10e_long_horizon
+    "pi05_ur10e_long_horizon_lora": (
+        "Stack the cup from the left plate into the cup on the right plate, then lift this nested pair and "
+        "stack it onto the third cup standing alone on the tabletop. Transfer the complete three-cup stack "
+        "into the basket. Next, stack the left plate onto the right plate, then place this stacked pair onto "
+        "the plate already inside the basket, aligning their edges. Finally, take the rag from the right side "
+        "of the workspace, thoroughly wipe the entire tabletop, and return the rag to its original position."
+    ),
+}
+
+# 改这一行来选择当前 serve_policy.py 实际加载的是哪个 checkpoint/config。
+ACTIVE_CHECKPOINT = "pi05_ur10e_long_horizon_lora"
 
 
 class RobotiqGripper:
@@ -98,40 +124,44 @@ def execute_action(action):
 def main():
     # host/port 已经在文件顶部的 HOST_IP / HOST_PORT 里配置，这里直接引用，不用改这一行
     client = websocket_client_policy.WebsocketClientPolicy(host=HOST_IP, port=HOST_PORT)
+    task_instruction = CHECKPOINT_PROMPTS[ACTIVE_CHECKPOINT]
 
-    task_instruction = "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth"
+    num_steps = 200            # 想让机器人跑多少个时间步，自己定
+    query_every_n_steps = 10   # 每隔多少步重新问一次服务器要新动作（不用每一步都问）
 
-    num_steps = 200          # 想让机器人跑多少个时间步，自己定
-    query_every_n_steps = 10  # 每隔多少步重新问一次服务器要新动作（不用每一步都问）
-
-    action_chunk = None
+    # PipelinedActionChunkBroker 和之前手写的 "action_chunk is None or step % N == 0"
+    # 效果一样(每 query_every_n_steps 步问一次服务器、其余步数复用同一个 chunk)，
+    # 区别是它会在这一块动作还没用完时就提前在后台线程发起下一次查询，把网络+推理
+    # 延迟藏在剩余动作的执行过程里，而不是让机械臂在查询新动作时明显停顿。
+    broker = action_chunk_broker.PipelinedActionChunkBroker(
+        policy=client,
+        action_horizon=query_every_n_steps,
+    )
 
     for step in range(num_steps):
-        # 每隔 N 步，或者还没有可用的动作块时，才重新查询服务器
-        if action_chunk is None or step % query_every_n_steps == 0:
-            img = get_camera_image()
-            state = get_robot_state()
+        img = get_camera_image()
+        state = get_robot_state()
 
-            observation = {
-                # resize_with_pad + convert_to_uint8：跟训练时的预处理方式对齐，官方推荐这么写
-                "observation/image": image_tools.convert_to_uint8(
-                    image_tools.resize_with_pad(img, 224, 224)
-                ),
-                "observation/state": state,   # 不需要自己归一化，服务器端会自动处理
-                "prompt": task_instruction,
-            }
+        observation = {
+            # resize_with_pad + convert_to_uint8：跟训练时的预处理方式对齐，官方推荐这么写
+            "observation/image": image_tools.convert_to_uint8(image_tools.resize_with_pad(img, 224, 224)),
+            "observation/state": state,   # 不需要自己归一化，服务器端会自动处理
+            "prompt": task_instruction,
+        }
 
-            result = client.infer(observation)
-            action_chunk = result["actions"]   # 形状是 (action_horizon, 7)
-            chunk_index = 0
+        infer_start = time.monotonic()
+        action = broker.infer(observation)
+        infer_ms = (time.monotonic() - infer_start) * 1000
+        if infer_ms > 20:
+            # 缓存命中应该 <1ms；如果经常看到几十/上百 ms，说明后台预取没能在动作块
+            # 用完前提前拿到结果，可以调大 replan_trigger_step（更早触发预取）或者
+            # 检查服务器端 server_timing/infer_ms 看推理本身是不是太慢。
+            logging.info(f"[step {step}] broker.infer() blocked for {infer_ms:.1f} ms")
 
-        # 从这一块动作序列里，依次取出一步来执行（"开环"执行，直到用完这一块再重新问）
-        action = action_chunk[chunk_index]
         execute_action(action)
-        chunk_index += 1
-
         time.sleep(0.1)   # 按你机器人实际控制频率调整，比如 10Hz 对应 0.1 秒
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()
