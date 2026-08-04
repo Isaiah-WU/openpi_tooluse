@@ -44,8 +44,29 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
-        data = self._packer.pack(obs)
+    def infer(  # noqa: UP006
+        self,
+        obs: Dict,
+        *,
+        prefix_actions=None,
+        prefix_attention_horizon=None,
+    ) -> Dict:  # noqa: UP006
+        if prefix_actions is None:
+            # Common path: send the observation as-is (byte-identical to the original
+            # protocol, so older servers keep working).
+            data = self._packer.pack(obs)
+        else:
+            # RTC path: bundle the observation together with the extra sampling kwargs.
+            # The server unwraps "observation" and forwards "infer_kwargs" to Policy.infer.
+            data = self._packer.pack(
+                {
+                    "observation": obs,
+                    "infer_kwargs": {
+                        "prefix_actions": prefix_actions,
+                        "prefix_attention_horizon": prefix_attention_horizon,
+                    },
+                }
+            )
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):

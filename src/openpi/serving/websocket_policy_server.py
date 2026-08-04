@@ -55,14 +55,23 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                msg = msgpack_numpy.unpackb(await websocket.recv())
+                # The client may bundle extra sampling kwargs (e.g. RTC prefix_actions)
+                # alongside the observation. Only unwrap when both marker keys are present
+                # so a raw observation dict (the original protocol) is untouched.
+                if isinstance(msg, dict) and "observation" in msg and "infer_kwargs" in msg:
+                    obs = msg["observation"]
+                    infer_kwargs = dict(msg["infer_kwargs"])
+                else:
+                    obs = msg
+                    infer_kwargs = {}
 
                 infer_time = time.monotonic()
                 # Run inference in a worker thread so it doesn't block the event loop --
                 # otherwise this single call would stall every other connection (and any
                 # pipelined prefetch request from this same client) for the duration of
                 # the GPU/model forward pass.
-                action = await asyncio.to_thread(self._policy.infer, obs)
+                action = await asyncio.to_thread(self._policy.infer, obs, **infer_kwargs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {

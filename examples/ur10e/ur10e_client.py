@@ -129,13 +129,19 @@ def main():
     num_steps = 200            # 想让机器人跑多少个时间步，自己定
     query_every_n_steps = 10   # 每隔多少步重新问一次服务器要新动作（不用每一步都问）
 
-    # PipelinedActionChunkBroker 和之前手写的 "action_chunk is None or step % N == 0"
-    # 效果一样(每 query_every_n_steps 步问一次服务器、其余步数复用同一个 chunk)，
-    # 区别是它会在这一块动作还没用完时就提前在后台线程发起下一次查询，把网络+推理
-    # 延迟藏在剩余动作的执行过程里，而不是让机械臂在查询新动作时明显停顿。
-    broker = action_chunk_broker.PipelinedActionChunkBroker(
+    # RtcActionChunkBroker = PipelinedActionChunkBroker(后台线程提前预取下一块动作,
+    # 隐藏网络+推理延迟) + RTC 平滑衔接:预取时把当前 chunk 还没执行完的尾部动作
+    # (committed tail)一起发给模型,让新 chunk 的开头几步被"锚定"到旧轨迹上,权重从
+    # 1 衰减到 0,而不是在 chunk 边界处硬切换 —— 倒水/擦桌子这类连续运动任务在衔接
+    # 点的顿挫本身就是失败原因之一。
+    broker = action_chunk_broker.RtcActionChunkBroker(
         policy=client,
         action_horizon=query_every_n_steps,
+        # 调参提示:
+        # - replan_trigger_step: 默认 action_horizon//2。如果日志常出现
+        #   "broker.infer() blocked for xxx ms",说明预取不够早,调大它(0~9)。
+        # - prefix_attention_horizon: RTC 软约束衰减到 0 的边界,默认=action_horizon。
+        #   调小会让模型更早恢复"完全自由重新规划",调大则让衔接更贴旧轨迹。
     )
 
     for step in range(num_steps):

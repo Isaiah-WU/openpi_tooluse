@@ -148,3 +148,86 @@ class PipelinedActionChunkBroker(_base_policy.BasePolicy):
         self._last_results = None
         self._next_results = None
         self._cur_step = 0
+
+
+class RtcActionChunkBroker(PipelinedActionChunkBroker):
+    """Pipelined chunk broker that smooths chunk switches via RTC-style inpainting.
+
+    On top of PipelinedActionChunkBroker (which prefetches the next chunk in a background
+    thread), this broker also hands the not-yet-executed tail of the current chunk to the
+    policy as `prefix_actions` when prefetching. The policy anchors the head of the new
+    chunk to that committed tail with a blend weight that is 1 over the committed region
+    and decays to 0 over `prefix_attention_horizon`, so the switch is a smooth
+    continuation instead of a hard jump. This is the real-time chunking (RTC) idea from
+    the pi0.5 line of work, applied to the flow-matching sampler.
+
+    Note: `prefix_attention_horizon` must land inside the wrapped policy's contract (it
+    is forwarded to Policy.infer); it defaults to the full action horizon.
+    """
+
+    def __init__(
+        self,
+        policy: _base_policy.BasePolicy,
+        action_horizon: int,
+        replan_trigger_step: int | None = None,
+        prefix_attention_horizon: int | None = None,
+    ):
+        super().__init__(policy, action_horizon, replan_trigger_step)
+        # Where the blend weight decays to zero (fully free replanning). The strongly
+        # committed length is implicit: how many steps of the current chunk remain at
+        # prefetch time (action_horizon - replan_trigger_step).
+        self._prefix_attention_horizon = (
+            prefix_attention_horizon if prefix_attention_horizon is not None else action_horizon
+        )
+        # Last action of the previous chunk, used to log the joint-space L2 jump at each
+        # switch (an objective proxy for how smooth the chunk transitions are).
+        self._prev_last_action: np.ndarray | None = None
+
+    def _start_prefetch(self, obs: Dict) -> None:
+        # Snapshot the committed tail of the current chunk on the main thread before the
+        # worker starts. This is read-only w.r.t. the main thread (which only slices the
+        # same array), so there is no write race.
+        committed_actions = self._last_results["actions"][self._replan_trigger_step :, ...]
+        self._prev_last_action = self._last_results["actions"][self._action_horizon - 1, ...]
+
+        def worker():
+            try:
+                results = self._policy.infer(
+                    obs,
+                    prefix_actions=committed_actions,
+                    prefix_attention_horizon=self._prefix_attention_horizon,
+                )
+            except Exception:
+                logger.exception("RTC prefetch inference call failed; will fall back to a blocking call.")
+                return
+            with self._lock:
+                self._next_results = results
+
+        self._pending_thread = threading.Thread(target=worker, daemon=True)
+        self._pending_thread.start()
+
+    def _await_prefetch(self, obs: Dict) -> None:
+        if self._pending_thread is not None:
+            self._pending_thread.join()
+            self._pending_thread = None
+        with self._lock:
+            new_results = self._next_results
+            self._next_results = None
+        self._cur_step = 0
+        if new_results is None:
+            # Prefetch never ran or failed -- fall back to a plain blocking call. No RTC
+            # anchor, so this switch is a plain hard switch.
+            new_results = self._policy.infer(obs)
+            self._cur_step = 0
+        if self._prev_last_action is not None:
+            first_new = new_results["actions"][0, ...]
+            joint_l2 = float(
+                np.linalg.norm(np.asarray(self._prev_last_action) - np.asarray(first_new))
+            )
+            logger.info(f"chunk switch joint L2 jump = {joint_l2:.4f}")
+        self._last_results = new_results
+
+    @override
+    def reset(self) -> None:
+        super().reset()
+        self._prev_last_action = None
