@@ -8,6 +8,9 @@ UR10e 客户端：从策略服务器获取动作，并在真实机器人上执�
    pip install ur_rtde pyrealsense2 numpy
 4. 修改下面 ROBOT_IP 为你 UR10e 的真实 IP
 5. 确认示教器上装了 Robotiq 的 URCap 插件（socket 端口默认 63352）
+6. 两个 RealSense 相机型号相同，跑之前用 `rs-enumerate-devices` 查出各自的序列号，
+   填进下面的 BASE_CAMERA_SERIAL / WRIST_CAMERA_SERIAL，不填的话程序会直接报错退出
+   （宁可现在报错，也不要让 base/wrist 画面被静默换错）
 """
 
 import logging
@@ -23,6 +26,11 @@ from openpi_client import action_chunk_broker
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy
 
+# 提前配置好日志格式：下面的相机绑定代码在 import 阶段(模块级)就会打印 INFO 日志，
+# 如果留到文件末尾 `if __name__ == "__main__":` 里才 basicConfig，那时早就晚了，
+# 日志会被 root logger 的默认 WARNING 阈值悄悄吞掉。
+logging.basicConfig(level=logging.INFO)
+
 # ========================
 
 ROBOT_IP = "192.168.1.9"
@@ -31,6 +39,15 @@ GRIPPER_MAX_POS = 255
 
 HOST_IP = "127.0.0.1"
 HOST_PORT = 8000
+
+# 两个 RealSense 相机型号完全相同，SDK 没法按名字/型号区分哪个是外部(base)相机、
+# 哪个是腕部(wrist)相机 —— 必须按各自的序列号(Serial Number)绑定，否则每个 pipeline
+# 的 start() 具体连到哪个物理相机是不确定的，可能导致 base/wrist 画面被换，模型会学到
+# 错误的视角关系而不自知。用命令行工具 `rs-enumerate-devices` 查看两个相机各自的
+# "Device Serial No"（可以先只插一个相机跑一次这个命令记下序列号，再插第二个，这样
+# 能分清哪个序列号对应哪个物理相机），然后填在下面：
+BASE_CAMERA_SERIAL = "244222070262"    # world camera —— 固定装在工作台上方/外部的相机
+WRIST_CAMERA_SERIAL = "213522071124"   # wrist camera —— 装在机械臂末端腕部的相机
 
 # ============================================================
 
@@ -87,13 +104,40 @@ rtde_c = rtde_control.RTDEControlInterface(ROBOT_IP)
 rtde_r = rtde_receive.RTDEReceiveInterface(ROBOT_IP)
 gripper = RobotiqGripper(ROBOT_IP)
 
-pipeline = rs.pipeline()
-rs_config = rs.config()
-rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-pipeline.start(rs_config)
+def _resolve_camera_serials() -> tuple[str, str]:
+    """返回 (base_serial, wrist_serial)。两个相机型号相同,无法靠名字区分,必须显式绑定
+    序列号(Intel 官方多相机文档的推荐做法:enumerate 设备 -> config.enable_device(serial))。
+    没配的话直接报错退出,而不是猜一个默认绑定 —— 一旦 base/wrist 被静默换过,模型收到
+    的每一帧观测都是错的,而且不会有任何报错提示,比启动时报错难排查得多。
+    """
+    if BASE_CAMERA_SERIAL and WRIST_CAMERA_SERIAL:
+        return BASE_CAMERA_SERIAL, WRIST_CAMERA_SERIAL
+    ctx = rs.context()
+    serials = [d.get_info(rs.camera_info.serial_number) for d in ctx.query_devices()]
+    raise RuntimeError(
+        "BASE_CAMERA_SERIAL / WRIST_CAMERA_SERIAL 还没填(文件顶部)。"
+        f"当前检测到的 RealSense 序列号: {serials}。"
+        "先跑 `rs-enumerate-devices`,分清哪个序列号是外部相机、哪个是腕部相机"
+        "(比如先拔掉一个只留一个插着跑一次命令),再把两个常量填上。"
+    )
 
 
-def get_camera_image():
+def _start_camera_pipeline(serial: str, label: str) -> rs.pipeline:
+    pipeline = rs.pipeline()
+    rs_config = rs.config()
+    rs_config.enable_device(serial)
+    rs_config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    pipeline.start(rs_config)
+    logging.info(f"{label} 相机 pipeline 已启动 (serial={serial})")
+    return pipeline
+
+
+BASE_SERIAL, WRIST_SERIAL = _resolve_camera_serials()
+base_pipeline = _start_camera_pipeline(BASE_SERIAL, "base")
+wrist_pipeline = _start_camera_pipeline(WRIST_SERIAL, "wrist")
+
+
+def get_camera_image(pipeline: rs.pipeline) -> np.ndarray:
     frames = pipeline.wait_for_frames()
     color_frame = frames.get_color_frame()
     img_bgr = np.asanyarray(color_frame.get_data())
@@ -145,12 +189,16 @@ def main():
     )
 
     for step in range(num_steps):
-        img = get_camera_image()
+        img = get_camera_image(base_pipeline)
+        wrist_img = get_camera_image(wrist_pipeline)
         state = get_robot_state()
 
         observation = {
             # resize_with_pad + convert_to_uint8：跟训练时的预处理方式对齐，官方推荐这么写
             "observation/image": image_tools.convert_to_uint8(image_tools.resize_with_pad(img, 224, 224)),
+            "observation/wrist_image": image_tools.convert_to_uint8(
+                image_tools.resize_with_pad(wrist_img, 224, 224)
+            ),
             "observation/state": state,   # 不需要自己归一化，服务器端会自动处理
             "prompt": task_instruction,
         }
@@ -169,5 +217,4 @@ def main():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     main()

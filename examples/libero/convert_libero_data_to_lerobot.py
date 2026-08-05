@@ -53,8 +53,11 @@ def main(data_dir: str, *, push_to_hub: bool = False):
                 "shape": (480, 640, 3),          # 改成真实分辨率
                 "names": ["height", "width", "channel"],
         },
-        # "wrist_image" 这一整块直接删掉——你没有真实腕部相机，
-        # 不需要在数据集里存一份假的全零图像，白白占用磁盘空间
+        "wrist_image": {
+            "dtype": "image",
+            "shape": (480, 640, 3),           # 改成腕部相机真实分辨率(和外部相机不一定一样)
+            "names": ["height", "width", "channel"],
+        },
         "state": {
             "dtype": "float32",
             "shape": (7,),
@@ -79,16 +82,19 @@ def main(data_dir: str, *, push_to_hub: bool = False):
     for episode_path in glob.glob(f"{data_dir}/*.hdf5"):
         try:
             with h5py.File(episode_path, "r") as f:
-                required_keys = ["actions", "observations/rgb", "observations/qpos"]
+                # "observations/wrist_rgb" 是按外部相机 "observations/rgb" 对称猜的键名，
+                # 如果你实际采集脚本里腕部相机数据存的键名不一样，这里要相应改成真实的键名。
+                required_keys = ["actions", "observations/rgb", "observations/wrist_rgb", "observations/qpos"]
                 if not all(key in f for key in required_keys):
                     print(f" 警告: 跳过文件 {episode_path}，因为缺少必要的键 {required_keys}。")
                     continue
 
-                num_steps = f["actions"].shape[0]          
+                num_steps = f["actions"].shape[0]
                 for i in range(num_steps):
                     dataset.add_frame({
-                        "image": f["observations/rgb"][i],   
-                        "state": f["observations/qpos"][i],   
+                        "image": f["observations/rgb"][i],
+                        "wrist_image": f["observations/wrist_rgb"][i],
+                        "state": f["observations/qpos"][i],
                         "actions": f["actions"][i],
                         "task": "Stack the cup from the left plate into the cup on the right plate, then lift this nested pair and stack it onto the third cup standing alone on the tabletop. Transfer the complete three-cup stack into the basket. Next, stack the left plate onto the right plate, then place this stacked pair onto the plate already inside the basket, aligning their edges. Finally, take the rag from the right side of the workspace, thoroughly wipe the entire tabletop, and return the rag to its original position.",
                     })
