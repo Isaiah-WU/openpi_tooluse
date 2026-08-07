@@ -96,7 +96,7 @@ def main(data_dir: str, *, push_to_hub: bool = False):
                         "wrist_image": f["observations/wrist_rgb"][i],
                         "state": f["observations/qpos"][i],
                         "actions": f["actions"][i],
-                        "task": "Stack the cup from the left plate into the cup on the right plate, then lift this nested pair and stack it onto the third cup standing alone on the tabletop. Transfer the complete three-cup stack into the basket. Next, stack the left plate onto the right plate, then place this stacked pair onto the plate already inside the basket, aligning their edges. Finally, take the rag from the right side of the workspace, thoroughly wipe the entire tabletop, and return the rag to its original position.",
+                        "task": "Pick up the yellow cup at the back and place it into the blue cup in the front. Lift the nested cups and place them into the blue cup inside the basket. Pick up the blue plate at the back and place it onto the blue plate in the front. Lift the stacked plates and place them onto the blue plate inside the basket. Take the rag and wipe the table.",
                     })
         
             dataset.save_episode()

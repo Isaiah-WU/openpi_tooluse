@@ -64,11 +64,11 @@ CHECKPOINT_PROMPTS = {
     # config.py: pi05_ur10e_long_horizon_lora
     # 数据集: wbjsamuel/ur10e_long_horizon
     "pi05_ur10e_long_horizon_lora": (
-        "Stack the cup from the left plate into the cup on the right plate, then lift this nested pair and "
-        "stack it onto the third cup standing alone on the tabletop. Transfer the complete three-cup stack "
-        "into the basket. Next, stack the left plate onto the right plate, then place this stacked pair onto "
-        "the plate already inside the basket, aligning their edges. Finally, take the rag from the right side "
-        "of the workspace, thoroughly wipe the entire tabletop, and return the rag to its original position."
+        "Pick up the yellow cup at the back and place it into the blue cup in the front. "
+        "Lift the nested cups and place them into the blue cup inside the basket. "
+        "Pick up the blue plate at the back and place it onto the blue plate in the front. "
+        "Lift the stacked plates and place them onto the blue plate inside the basket. "
+        "Take the rag and wipe the table."
     ),
 }
 
