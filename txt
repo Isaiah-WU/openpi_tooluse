@@ -1,3 +1,5 @@
 uv run examples/libero/convert_libero_data_to_lerobot.py --data_dir /home/wbjsamuel/projects/openpi_demo/demo
 
-Weights & Biases: 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
+
+
+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
