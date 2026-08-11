@@ -28,6 +28,9 @@ REQUEST_METRIC_NAMES = (
 )
 
 CYCLE_METRIC_NAMES = (
+    "arm_action_delta_l2",
+    "max_abs_arm_action_delta",
+    "gripper_action_delta_abs",
     "execute_action_ms",
     "control_cycle_ms",
 )

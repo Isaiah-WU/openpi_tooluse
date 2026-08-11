@@ -30,6 +30,7 @@ from action_trajectory import should_request_action_chunk
 from async_policy import AsyncPolicyProcess
 from rtc_calibration import RTCDelayTracker
 from rtc_calibration import validate_rtc_runtime_parameters
+from runtime_safety import request_execution_arm
 from runtime_timing import ControlCycleTiming
 from timing_recorder import TimingRecorder
 
@@ -50,6 +51,11 @@ WRIST_CAMERA_SERIAL = "213522071124"
 # Keep the established synchronous entry point as the safe default. Set this
 # to True to collect asynchronous timing and, later, execute RTC requests.
 USE_ASYNC_RUNTIME = False
+
+# False performs real observation and inference timing without creating an
+# RTDE control connection or sending arm/gripper actuation commands. Motion additionally
+# requires an exact interactive arming phrase at startup.
+ROBOT_ACTIONS_ENABLED = False
 
 # RTC stays opt-in until request_timing.csv provides a stable delay estimate.
 # Set the estimate in policy-rate (30 Hz) steps, preferably from the measured
@@ -80,11 +86,18 @@ ACTIVE_CHECKPOINT = "pi05_ur10e_long_horizon_lora"
 
 class RobotiqGripper:
 
-    def __init__(self, robot_ip: str, port: int = GRIPPER_PORT):
+    def __init__(
+        self,
+        robot_ip: str,
+        port: int = GRIPPER_PORT,
+        *,
+        activate: bool = True,
+    ):
         self.sock = socket.create_connection((robot_ip, port), timeout=2.0)
-        # 激活夹爪（第一次连接后通常需要激活一次）
-        self._send("SET ACT 1")
-        self._send("SET GTO 1")
+        if activate:
+            # 激活夹爪（第一次连接后通常需要激活一次）
+            self._send("SET ACT 1")
+            self._send("SET GTO 1")
 
     def _send(self, cmd: str) -> str:
         self.sock.sendall((cmd + "\n").encode("utf-8"))
@@ -154,21 +167,24 @@ def _start_camera_pipeline(
     return camera_pipeline
 
 
-def initialize_hardware():
+def initialize_hardware(*, actions_enabled: bool):
     global rtde_c
     global rtde_r
     global gripper
     global base_pipeline
     global wrist_pipeline
 
-    rtde_c = rtde_control.RTDEControlInterface(
-        ROBOT_IP
+    rtde_c = (
+        rtde_control.RTDEControlInterface(ROBOT_IP)
+        if actions_enabled
+        else None
     )
     rtde_r = rtde_receive.RTDEReceiveInterface(
         ROBOT_IP
     )
     gripper = RobotiqGripper(
-        ROBOT_IP
+        ROBOT_IP,
+        activate=actions_enabled,
     )
 
     base_serial, wrist_serial = (
@@ -266,6 +282,9 @@ def capture_observation(task_instruction):
 
 def execute_action(action):
     """action 是长度为 7 的一维数组：前 6 维是关节目标角度，第 7 维是夹爪目标位置"""
+    if rtde_c is None:
+        raise RuntimeError("RTDE control is unavailable because actions are not armed")
+
     joint_targets = action[:6].tolist()
     gripper_target = float(action[6])
 
@@ -290,7 +309,17 @@ def main_async():
             RTC_INFERENCE_DELAY_POLICY_STEPS,
         )
 
-    initialize_hardware()
+    execution_armed = request_execution_arm(
+        ROBOT_ACTIONS_ENABLED,
+    )
+    if not execution_armed:
+        logging.warning(
+            "DRY RUN: policy actions will be measured but not sent to the robot"
+        )
+
+    initialize_hardware(
+        actions_enabled=execution_armed,
+    )
     task_instruction = CHECKPOINT_PROMPTS[
         ACTIVE_CHECKPOINT
     ]
@@ -563,6 +592,20 @@ def main_async():
                     if chunk_index == 0
                     else "current_chunk"
                 )
+                cycle.actions_enabled = execution_armed
+                cycle.chunk_boundary = chunk_index == 0
+
+                if last_action is not None:
+                    action_delta = action - last_action
+                    cycle.arm_action_delta_l2 = float(
+                        np.linalg.norm(action_delta[:6])
+                    )
+                    cycle.max_abs_arm_action_delta = float(
+                        np.max(np.abs(action_delta[:6]))
+                    )
+                    cycle.gripper_action_delta_abs = float(
+                        abs(action_delta[6])
+                    )
 
                 action_start = time.perf_counter()
                 cycle.execute_action_start = action_start
@@ -572,7 +615,8 @@ def main_async():
                         action_start
                     )
 
-                execute_action(action)
+                if execution_armed:
+                    execute_action(action)
 
                 last_action = action.copy()
 
@@ -600,12 +644,17 @@ def main_async():
                     chunk_index - 1,
                 )
                 cycle.action_source = "hold_last"
+                cycle.actions_enabled = execution_armed
+                cycle.arm_action_delta_l2 = 0.0
+                cycle.max_abs_arm_action_delta = 0.0
+                cycle.gripper_action_delta_abs = 0.0
 
                 cycle.execute_action_start = (
                     time.perf_counter()
                 )
 
-                execute_action(last_action)
+                if execution_armed:
+                    execute_action(last_action)
 
                 cycle.execute_action_end = (
                     time.perf_counter()
@@ -642,7 +691,17 @@ def main_async():
 
 def main():
     # host/port 已经在文件顶部的 HOST_IP / HOST_PORT 里配置，这里直接引用，不用改这一行
-    initialize_hardware()
+    execution_armed = request_execution_arm(
+        ROBOT_ACTIONS_ENABLED,
+    )
+    if not execution_armed:
+        logging.warning(
+            "DRY RUN: policy actions will be measured but not sent to the robot"
+        )
+
+    initialize_hardware(
+        actions_enabled=execution_armed,
+    )
     client = websocket_client_policy.WebsocketClientPolicy(host=HOST_IP, port=HOST_PORT)
 
     task_instruction = CHECKPOINT_PROMPTS[
@@ -670,7 +729,8 @@ def main():
 
             # 从这一块动作序列里，依次取出一步来执行（"开环"执行，直到用完这一块再重新问）
             action = action_chunk[chunk_index]
-            execute_action(action)
+            if execution_armed:
+                execute_action(action)
             chunk_index += 1
 
             time.sleep(0.1)   # 按你机器人实际控制频率调整，比如 10Hz 对应 0.1 秒

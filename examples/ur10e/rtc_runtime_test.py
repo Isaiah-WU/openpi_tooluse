@@ -6,6 +6,7 @@ import pytest
 from action_trajectory import get_policy_action_leftover
 from action_trajectory import prepare_action_chunk
 from async_policy import _build_rtc_infer_kwargs
+from runtime_timing import ControlCycleTiming
 from runtime_timing import RequestTiming
 
 
@@ -137,3 +138,24 @@ def test_timing_exports_prediction_and_actual_alignment() -> None:
     assert metrics["observed_delay_steps"] == 3
     assert metrics["observed_delay_policy_steps"] == 9
     assert metrics["rtc_skipped_policy_steps"] == 9
+
+
+def test_control_timing_exports_safety_and_boundary_metrics() -> None:
+    timing = ControlCycleTiming(
+        control_step=5,
+        cycle_start=1.0,
+        action_source="new_chunk",
+        actions_enabled=False,
+        chunk_boundary=True,
+        arm_action_delta_l2=0.2,
+        max_abs_arm_action_delta=0.1,
+        gripper_action_delta_abs=0.05,
+        cycle_end=1.1,
+    )
+
+    metrics = timing.as_metrics()
+    assert metrics["actions_enabled"] == 0
+    assert metrics["chunk_boundary"] == 1
+    assert metrics["arm_action_delta_l2"] == 0.2
+    assert metrics["max_abs_arm_action_delta"] == 0.1
+    assert metrics["gripper_action_delta_abs"] == 0.05

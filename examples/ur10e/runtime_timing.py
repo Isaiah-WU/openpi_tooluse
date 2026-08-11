@@ -129,6 +129,11 @@ class ControlCycleTiming:
     request_id: int | None = None
     action_index: int | None = None
     action_source: str = "unknown"
+    actions_enabled: bool = False
+    chunk_boundary: bool = False
+    arm_action_delta_l2: float | None = None
+    max_abs_arm_action_delta: float | None = None
+    gripper_action_delta_abs: float | None = None
 
     execute_action_start: float | None = None
     execute_action_end: float | None = None
@@ -149,6 +154,23 @@ class ControlCycleTiming:
                 else -1
             ),
             "action_source": self.action_source,
+            "actions_enabled": int(self.actions_enabled),
+            "chunk_boundary": int(self.chunk_boundary),
+            "arm_action_delta_l2": (
+                self.arm_action_delta_l2
+                if self.arm_action_delta_l2 is not None
+                else float("nan")
+            ),
+            "max_abs_arm_action_delta": (
+                self.max_abs_arm_action_delta
+                if self.max_abs_arm_action_delta is not None
+                else float("nan")
+            ),
+            "gripper_action_delta_abs": (
+                self.gripper_action_delta_abs
+                if self.gripper_action_delta_abs is not None
+                else float("nan")
+            ),
             "execute_action_ms": _duration_ms(
                 self.execute_action_start,
                 self.execute_action_end,
