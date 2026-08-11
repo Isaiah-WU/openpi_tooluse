@@ -1,17 +1,58 @@
 """Asynchronous policy inference for the UR10e client."""
 
 from __future__ import annotations
-from runtime_timing import RequestTiming
+
+import multiprocessing as mp
+import queue
+import time
+import traceback
 from typing import Any
 
-import time
 import numpy as np
-import queue
-import traceback
-import multiprocessing as mp
+
+from runtime_timing import RequestTiming
 
 
+def _build_rtc_infer_kwargs(
+    prev_chunk_left_over: np.ndarray | None,
+    *,
+    rtc_enabled: bool,
+    inference_delay_steps: int | None,
+    execution_horizon: int | None,
+    action_dim: int,
+) -> dict[str, Any]:
+    """Build one RTC request, leaving first/no-prefix requests unchanged."""
+    if prev_chunk_left_over is None:
+        return {}
+    if not rtc_enabled:
+        raise ValueError("prev_chunk_left_over was provided while RTC is disabled")
+    if (
+        not isinstance(inference_delay_steps, int)
+        or isinstance(inference_delay_steps, bool)
+        or inference_delay_steps < 0
+    ):
+        raise ValueError("RTC requires a non-negative inference_delay_steps estimate")
+    if (
+        not isinstance(execution_horizon, int)
+        or isinstance(execution_horizon, bool)
+        or execution_horizon <= 0
+    ):
+        raise ValueError("RTC requires a positive execution_horizon")
 
+    prefix = np.asarray(prev_chunk_left_over, dtype=np.float32)
+    if prefix.ndim != 2 or prefix.shape[1] != action_dim:
+        raise ValueError(
+            "prev_chunk_left_over must have "
+            f"shape (steps, {action_dim}), got {prefix.shape}"
+        )
+    if len(prefix) == 0:
+        return {}
+
+    return {
+        "prev_chunk_left_over": np.ascontiguousarray(prefix),
+        "inference_delay": inference_delay_steps,
+        "execution_horizon": execution_horizon,
+    }
 
 def _fake_infer(
     observation: dict[str, Any],
@@ -59,6 +100,7 @@ def _fake_infer(
         "fake_inference": True,
     }
 
+
 def _policy_worker(
     request_queue,
     response_queue,
@@ -94,6 +136,7 @@ def _policy_worker(
 
             request_id = request["request_id"]
             observation = request["observation"]
+            infer_kwargs = request["infer_kwargs"]
             timing: RequestTiming = request["timing"]
 
             try:
@@ -107,7 +150,10 @@ def _policy_worker(
                         action_dim=action_dim,
                     )
                 else:
-                    result = policy_client.infer(observation)
+                    result = policy_client.infer(
+                        observation,
+                        **infer_kwargs,
+                    )
 
                 timing.worker_infer_end = time.perf_counter()
 
@@ -130,6 +176,7 @@ def _policy_worker(
                         "fake_inference",
                         False,
                     ),
+                    "rtc_applied": bool(infer_kwargs),
                     "timing": timing,
                 }
 
@@ -167,6 +214,9 @@ class AsyncPolicyProcess:
         fake_delay_ms: float | None = None,
         action_horizon: int = 50,
         action_dim: int = 7,
+        rtc_enabled: bool = False,
+        rtc_inference_delay_steps: int | None = None,
+        rtc_execution_horizon: int | None = None,
     ) -> None:
         if fake_delay_ms is not None and fake_delay_ms < 0:
             raise ValueError("fake_delay_ms must be non-negative")
@@ -176,6 +226,29 @@ class AsyncPolicyProcess:
 
         if action_dim <= 0:
             raise ValueError("action_dim must be positive")
+
+        if rtc_enabled:
+            if (
+                not isinstance(rtc_inference_delay_steps, int)
+                or isinstance(rtc_inference_delay_steps, bool)
+                or rtc_inference_delay_steps < 0
+            ):
+                raise ValueError(
+                    "rtc_inference_delay_steps must be non-negative when RTC is enabled"
+                )
+            if (
+                not isinstance(rtc_execution_horizon, int)
+                or isinstance(rtc_execution_horizon, bool)
+                or rtc_execution_horizon <= 0
+            ):
+                raise ValueError(
+                    "rtc_execution_horizon must be positive when RTC is enabled"
+                )
+
+        self._rtc_enabled = rtc_enabled
+        self._rtc_inference_delay_steps = rtc_inference_delay_steps
+        self._rtc_execution_horizon = rtc_execution_horizon
+        self._action_dim = action_dim
 
         self._ctx = mp.get_context("spawn")
 
@@ -248,6 +321,11 @@ class AsyncPolicyProcess:
         """Return whether one inference request is still running."""
         return self._inflight
 
+    @property
+    def rtc_enabled(self) -> bool:
+        """Return whether requests may include RTC prefix guidance."""
+        return self._rtc_enabled
+
     def submit(
         self,
         observation: dict[str, Any],
@@ -256,6 +334,7 @@ class AsyncPolicyProcess:
         submit_step: int,
         observation_start: float,
         observation_ready: float,
+        prev_chunk_left_over: np.ndarray | None = None,
     ) -> RequestTiming:
         """Submit one observation for asynchronous inference."""
         if not self._process.is_alive():
@@ -270,6 +349,13 @@ class AsyncPolicyProcess:
 
         request_id = self._next_request_id
         request_submit = time.perf_counter()
+        infer_kwargs = _build_rtc_infer_kwargs(
+            prev_chunk_left_over,
+            rtc_enabled=self._rtc_enabled,
+            inference_delay_steps=self._rtc_inference_delay_steps,
+            execution_horizon=self._rtc_execution_horizon,
+            action_dim=self._action_dim,
+        )
 
         timing = RequestTiming(
             request_id=request_id,
@@ -278,12 +364,24 @@ class AsyncPolicyProcess:
             observation_start=observation_start,
             observation_ready=observation_ready,
             request_submit=request_submit,
+            rtc_prefix_steps=(
+                len(infer_kwargs["prev_chunk_left_over"])
+                if infer_kwargs
+                else 0
+            ),
+            rtc_inference_delay_steps=(
+                infer_kwargs.get("inference_delay")
+                if infer_kwargs
+                else None
+            ),
+            rtc_applied=bool(infer_kwargs),
         )
 
         self._request_queue.put_nowait(
             {
                 "request_id": request_id,
                 "observation": observation,
+                "infer_kwargs": infer_kwargs,
                 "timing": timing,
             }
         )

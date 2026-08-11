@@ -5,18 +5,18 @@ from __future__ import annotations
 import dataclasses
 
 
-
 def _duration_ms(start: float | None, end: float | None) -> float:
     """Return duration in milliseconds, or NaN when either endpoint is missing."""
     if start is None or end is None:
         return float("nan")
     return (end - start) * 1000.0
 
+
 @dataclasses.dataclass
 class RequestTiming:
     """Timing information for one asynchronous policy request."""
 
-    request_id: int 
+    request_id: int
 
     observation_step: int
     submit_step: int
@@ -24,6 +24,13 @@ class RequestTiming:
     observation_start: float
     observation_ready: float
     request_submit: float
+
+    rtc_prefix_steps: int = 0
+    rtc_inference_delay_steps: int | None = None
+    rtc_applied: bool = False
+    observed_delay_policy_steps: int | None = None
+    rtc_skipped_policy_steps: int = 0
+    chunk_rejected: bool = False
 
     worker_infer_start: float | None = None
     worker_infer_end: float | None = None
@@ -58,6 +65,20 @@ class RequestTiming:
                 if self.accept_step is not None
                 else -1
             ),
+            "rtc_prefix_steps": self.rtc_prefix_steps,
+            "rtc_inference_delay_steps": (
+                self.rtc_inference_delay_steps
+                if self.rtc_inference_delay_steps is not None
+                else -1
+            ),
+            "rtc_applied": int(self.rtc_applied),
+            "observed_delay_policy_steps": (
+                self.observed_delay_policy_steps
+                if self.observed_delay_policy_steps is not None
+                else -1
+            ),
+            "rtc_skipped_policy_steps": self.rtc_skipped_policy_steps,
+            "chunk_rejected": int(self.chunk_rejected),
             "observation_ms": _duration_ms(
                 self.observation_start,
                 self.observation_ready,

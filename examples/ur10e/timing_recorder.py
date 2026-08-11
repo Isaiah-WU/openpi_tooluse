@@ -1,14 +1,21 @@
 """Save and summarize UR10e runtime timing records."""
 
 from __future__ import annotations
-import math
-import numpy as np
+
 import csv
+import math
 from pathlib import Path
+
+import numpy as np
+
 from runtime_timing import ControlCycleTiming
 from runtime_timing import RequestTiming
 
 REQUEST_METRIC_NAMES = (
+    "rtc_prefix_steps",
+    "rtc_inference_delay_steps",
+    "observed_delay_policy_steps",
+    "rtc_skipped_policy_steps",
     "observation_ms",
     "queue_ms",
     "client_infer_ms",
@@ -24,8 +31,6 @@ CYCLE_METRIC_NAMES = (
     "execute_action_ms",
     "control_cycle_ms",
 )
-
-
 
 def _valid_numeric_values(
     rows: list[dict],
@@ -45,7 +50,11 @@ def _valid_numeric_values(
         if not math.isfinite(value):
             continue
 
-        if metric_name == "observed_delay_steps" and value < 0:
+        if metric_name in {
+            "rtc_inference_delay_steps",
+            "observed_delay_policy_steps",
+            "observed_delay_steps",
+        } and value < 0:
             continue
 
         values.append(value)
@@ -178,4 +187,3 @@ class TimingRecorder:
                 metric_name,
                 values,
             )
-

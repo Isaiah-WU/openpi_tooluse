@@ -22,10 +22,11 @@ import rtde_receive
 
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy
+from action_trajectory import get_policy_action_leftover
+from action_trajectory import prepare_action_chunk
 from async_policy import AsyncPolicyProcess
 from runtime_timing import ControlCycleTiming
 from timing_recorder import TimingRecorder
-from action_trajectory import resample_action_chunk
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,6 +41,17 @@ HOST_PORT = 8000
 
 BASE_CAMERA_SERIAL = "244222070262"
 WRIST_CAMERA_SERIAL = "213522071124"
+
+# Keep the established synchronous entry point as the safe default. Set this
+# to True to collect asynchronous timing and, later, execute RTC requests.
+USE_ASYNC_RUNTIME = False
+
+# RTC stays opt-in until request_timing.csv provides a stable delay estimate.
+# Set the estimate in policy-rate (30 Hz) steps, preferably from the measured
+# P95 observed_delay_policy_steps rather than from a single request.
+RTC_ENABLED = False
+RTC_INFERENCE_DELAY_POLICY_STEPS = None
+RTC_EXECUTION_HORIZON_POLICY_STEPS = 10
 
 # ============================================================
 
@@ -278,6 +290,9 @@ def main_async():
         fake_delay_ms=None,
         action_horizon=50,
         action_dim=7,
+        rtc_enabled=RTC_ENABLED,
+        rtc_inference_delay_steps=RTC_INFERENCE_DELAY_POLICY_STEPS,
+        rtc_execution_horizon=RTC_EXECUTION_HORIZON_POLICY_STEPS,
     )
 
     recorder = TimingRecorder(
@@ -285,6 +300,7 @@ def main_async():
     )
 
     action_chunk = None
+    policy_action_chunk = None
     chunk_index = 0
     next_query_step = 0
     action_chunk_timing = None
@@ -318,6 +334,13 @@ def main_async():
                         response["error"]
                     )
 
+                if returned_timing is None:
+                    raise RuntimeError(
+                        "Successful policy response has no timing"
+                    )
+
+                returned_timing.accept_step = step
+
                 returned_timing.chunk_prepare_start = (
                     time.perf_counter()
                 )
@@ -331,30 +354,72 @@ def main_async():
                     new_chunk.ndim != 2
                     or new_chunk.shape[0] == 0
                     or new_chunk.shape[1] != 7
+                    or not np.isfinite(new_chunk).all()
                 ):
                     raise ValueError(
-                        "Policy actions must have "
-                        f"shape (H, 7), got {new_chunk.shape}"
+                        "Policy actions must be finite and have "
+                        f"shape (H, 7), got shape={new_chunk.shape}"
                     )
 
-                new_chunk = resample_action_chunk(
+                observed_delay_control_steps = (
+                    returned_timing.observed_delay_steps()
+                )
+                if observed_delay_control_steps is None:
+                    raise RuntimeError(
+                        "Cannot align a chunk without observed delay"
+                    )
+
+                prepared_chunk = prepare_action_chunk(
                     new_chunk,
-                    source_hz=policy_action_hz,
-                    target_hz=control_hz,
+                    observed_delay_control_steps=(
+                        observed_delay_control_steps
+                    ),
+                    apply_rtc_delay_crop=bool(
+                        response.get(
+                            "rtc_applied",
+                            returned_timing.rtc_applied,
+                        )
+                    ),
+                    policy_hz=policy_action_hz,
+                    control_hz=control_hz,
+                )
+
+                returned_timing.observed_delay_policy_steps = (
+                    prepared_chunk.observed_delay_policy_steps
+                )
+                returned_timing.rtc_skipped_policy_steps = (
+                    prepared_chunk.skipped_policy_steps
                 )
 
                 returned_timing.chunk_prepare_end = (
                     time.perf_counter()
                 )
 
-                action_chunk = new_chunk
-                chunk_index = 0
-                action_chunk_timing = returned_timing
+                if len(prepared_chunk.control_actions) == 0:
+                    # The whole generated horizon became stale while inference
+                    # was running. Keep executing/holding the current chunk and
+                    # request a fresh one instead of replaying old actions.
+                    returned_timing.chunk_rejected = True
+                    next_query_step = step
+                    logging.warning(
+                        "Rejected stale RTC chunk request_id=%s "
+                        "observed_delay_policy_steps=%s",
+                        returned_timing.request_id,
+                        prepared_chunk.skipped_policy_steps,
+                    )
+                else:
+                    policy_action_chunk = (
+                        prepared_chunk.policy_actions
+                    )
+                    action_chunk = (
+                        prepared_chunk.control_actions
+                    )
+                    chunk_index = 0
+                    action_chunk_timing = returned_timing
 
-                returned_timing.accept_step = step
-                returned_timing.chunk_accept = (
-                    time.perf_counter()
-                )
+                    returned_timing.chunk_accept = (
+                        time.perf_counter()
+                    )
 
                 recorder.record_request(
                     returned_timing,
@@ -372,12 +437,29 @@ def main_async():
                     task_instruction,
                 )
 
+                prev_chunk_left_over = None
+                if (
+                    policy.rtc_enabled
+                    and policy_action_chunk is not None
+                ):
+                    prefix = get_policy_action_leftover(
+                        policy_action_chunk,
+                        consumed_control_steps=chunk_index,
+                        control_hz=control_hz,
+                        policy_hz=policy_action_hz,
+                    )
+                    if len(prefix) > 0:
+                        prev_chunk_left_over = prefix
+
                 submitted_timing = policy.submit(
                     observation,
                     observation_step=step,
                     submit_step=step,
                     observation_start=observation_start,
                     observation_ready=observation_ready,
+                    prev_chunk_left_over=(
+                        prev_chunk_left_over
+                    ),
                 )
 
                 recorder.record_request(
@@ -524,4 +606,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if USE_ASYNC_RUNTIME:
+        main_async()
+    else:
+        main()
