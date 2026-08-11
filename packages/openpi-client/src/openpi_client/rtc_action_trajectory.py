@@ -135,6 +135,28 @@ def should_request_action_chunk(
     return prefix_policy_steps <= rtc_query_remaining_policy_steps
 
 
+def is_rtc_delay_underestimated(
+    *,
+    rtc_applied: bool,
+    predicted_delay_policy_steps: int | None,
+    observed_delay_policy_steps: int,
+) -> bool:
+    """Return whether an RTC response outlasted its fully frozen prefix.
+
+    Only RTC responses carry a previous-chunk commitment. A non-RTC response,
+    including the first request, is therefore never rejected by this check.
+    """
+    if observed_delay_policy_steps < 0:
+        raise ValueError("observed_delay_policy_steps must be non-negative")
+    if not rtc_applied:
+        return False
+    if predicted_delay_policy_steps is None:
+        raise ValueError("an RTC response must record predicted_delay_policy_steps")
+    if predicted_delay_policy_steps < 0:
+        raise ValueError("predicted_delay_policy_steps must be non-negative")
+    return observed_delay_policy_steps > predicted_delay_policy_steps
+
+
 def prepare_action_chunk(
     actions: np.ndarray,
     *,

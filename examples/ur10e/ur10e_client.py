@@ -25,6 +25,7 @@ import rtde_receive
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy
 from action_trajectory import get_policy_action_leftover
+from action_trajectory import is_rtc_delay_underestimated
 from action_trajectory import prepare_action_chunk
 from action_trajectory import should_request_action_chunk
 from async_policy import AsyncPolicyProcess
@@ -62,7 +63,7 @@ ROBOT_ACTIONS_ENABLED = RUNTIME_CONFIG.robot_actions_enabled
 
 # RTC stays opt-in until request_timing.csv provides a stable delay estimate.
 # Set the estimate in policy-rate (30 Hz) steps, preferably from the measured
-# P95 observed_delay_policy_steps rather than from a single request.
+# P99 observed_delay_policy_steps rather than from a single request.
 RTC_ENABLED = RUNTIME_CONFIG.rtc_enabled
 RTC_INFERENCE_DELAY_POLICY_STEPS = (
     RUNTIME_CONFIG.rtc_inference_delay_policy_steps
@@ -463,17 +464,37 @@ def main_async():
                     time.perf_counter()
                 )
 
-                if len(prepared_chunk.control_actions) == 0:
-                    # The whole generated horizon became stale while inference
-                    # was running. Keep executing/holding the current chunk and
-                    # request a fresh one instead of replaying old actions.
+                rtc_applied = bool(
+                    response.get(
+                        "rtc_applied",
+                        returned_timing.rtc_applied,
+                    )
+                )
+                delay_underestimated = is_rtc_delay_underestimated(
+                    rtc_applied=rtc_applied,
+                    predicted_delay_policy_steps=(
+                        returned_timing.rtc_inference_delay_steps
+                    ),
+                    observed_delay_policy_steps=(
+                        prepared_chunk.observed_delay_policy_steps
+                    ),
+                )
+                fully_stale = len(prepared_chunk.control_actions) == 0
+
+                if delay_underestimated or fully_stale:
+                    # Keep executing/holding the current chunk. An
+                    # underestimated RTC response is not guaranteed to match
+                    # every action that elapsed while inference was running.
                     returned_timing.chunk_rejected = True
                     next_query_step = step
                     logging.warning(
-                        "Rejected stale RTC chunk request_id=%s "
-                        "observed_delay_policy_steps=%s",
+                        "Rejected RTC chunk request_id=%s "
+                        "predicted_delay_policy_steps=%s "
+                        "observed_delay_policy_steps=%s fully_stale=%s",
                         returned_timing.request_id,
-                        prepared_chunk.skipped_policy_steps,
+                        returned_timing.rtc_inference_delay_steps,
+                        prepared_chunk.observed_delay_policy_steps,
+                        fully_stale,
                     )
                 else:
                     policy_action_chunk = (

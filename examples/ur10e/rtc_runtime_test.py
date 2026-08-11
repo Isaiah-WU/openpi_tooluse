@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from action_trajectory import get_policy_action_leftover
+from action_trajectory import is_rtc_delay_underestimated
 from action_trajectory import prepare_action_chunk
 from async_policy import _build_rtc_infer_kwargs
 from runtime_timing import ControlCycleTiming
@@ -77,6 +78,39 @@ def test_first_request_keeps_original_protocol() -> None:
         execution_horizon=10,
         action_dim=7,
     ) == {}
+
+
+def test_non_rtc_response_ignores_delay_prediction() -> None:
+    assert not is_rtc_delay_underestimated(
+        rtc_applied=False,
+        predicted_delay_policy_steps=None,
+        observed_delay_policy_steps=9,
+    )
+
+
+def test_rtc_response_accepts_delay_equal_to_prediction() -> None:
+    assert not is_rtc_delay_underestimated(
+        rtc_applied=True,
+        predicted_delay_policy_steps=6,
+        observed_delay_policy_steps=6,
+    )
+
+
+def test_rtc_response_rejects_delay_above_prediction() -> None:
+    assert is_rtc_delay_underestimated(
+        rtc_applied=True,
+        predicted_delay_policy_steps=6,
+        observed_delay_policy_steps=7,
+    )
+
+
+def test_rtc_response_requires_recorded_prediction() -> None:
+    with pytest.raises(ValueError, match="must record"):
+        is_rtc_delay_underestimated(
+            rtc_applied=True,
+            predicted_delay_policy_steps=None,
+            observed_delay_policy_steps=7,
+        )
 
 
 def test_rtc_request_uses_policy_rate_prefix() -> None:

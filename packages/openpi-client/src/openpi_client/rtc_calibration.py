@@ -158,7 +158,9 @@ def recommend_rtc_parameters(
         raise ValueError("delays must contain finite non-negative values")
 
     p50, p95, p99 = np.percentile(array, [50, 95, 99])
-    inference_delay = int(math.ceil(float(p95)))
+    # P99 is a conservative initial forecast. Runtime still tracks the largest
+    # recent delay and rejects any RTC chunk that outlasts its frozen prefix.
+    inference_delay = int(math.ceil(float(p99)))
     execution_horizon = max(
         minimum_execution_horizon_policy_steps,
         inference_delay,

@@ -39,13 +39,21 @@ def test_combines_multiple_timing_runs(tmp_path: Path) -> None:
     assert load_baseline_policy_delays(tmp_path) == [6.0, 9.0]
 
 
-def test_recommends_p95_delay_and_p99_queue_margin() -> None:
+def test_recommends_p99_delay_and_p99_queue_margin() -> None:
     recommendation = recommend_rtc_parameters([6.0] * 20)
 
     assert recommendation.sample_count == 20
     assert recommendation.inference_delay_policy_steps == 6
     assert recommendation.execution_horizon_policy_steps == 10
     assert recommendation.query_remaining_policy_steps == 19
+
+
+def test_p99_tail_sets_initial_inference_delay() -> None:
+    recommendation = recommend_rtc_parameters([6.0] * 98 + [12.0] * 2)
+
+    assert recommendation.delay_p95 == 6.0
+    assert recommendation.delay_p99 == 12.0
+    assert recommendation.inference_delay_policy_steps == 12
 
 
 def test_execution_horizon_grows_with_measured_delay() -> None:
