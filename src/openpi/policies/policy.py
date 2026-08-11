@@ -21,6 +21,32 @@ from openpi.shared import nnx_utils
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
 
+def _make_rtc_blend_weight(action_horizon: int, num_committed: int, prefix_attention_horizon: int) -> np.ndarray:
+    """Builds the per-step blend weight used for RTC-style soft-masked inpainting.
+
+    weight[i] = 1 for i < num_committed (strongly committed: the new chunk must match the
+    old trajectory here), decays from just below 1 to 0 over [num_committed,
+    prefix_attention_horizon), and is 0 beyond (fully free replanning). The first
+    position of the decay window is *not* committed, so it starts strictly below 1;
+    positions in the window blend toward a smooth continuation of the committed
+    trajectory (the repeated last committed action).
+    """
+    if not 0 <= num_committed <= prefix_attention_horizon <= action_horizon:
+        raise ValueError(
+            f"expected 0 <= num_committed ({num_committed}) <= prefix_attention_horizon ({prefix_attention_horizon})"
+            f" <= action_horizon ({action_horizon})"
+        )
+    weight = np.zeros(action_horizon, dtype=np.float32)
+    if num_committed == 0:
+        # Nothing is committed, so there is nothing to anchor to.
+        return weight
+    weight[:num_committed] = 1.0
+    window_len = prefix_attention_horizon - num_committed
+    if window_len > 0:
+        weight[num_committed:prefix_attention_horizon] = np.linspace(1.0, 0.0, window_len + 1)[1:]
+    return weight
+
+
 class Policy(BasePolicy):
     def __init__(
         self,
@@ -65,7 +91,14 @@ class Policy(BasePolicy):
             self._rng = rng or jax.random.key(0)
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+    def infer(
+        self,
+        obs: dict,
+        *,
+        noise: np.ndarray | None = None,
+        prefix_actions: np.ndarray | None = None,
+        prefix_attention_horizon: int | None = None,
+    ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -86,6 +119,32 @@ class Policy(BasePolicy):
             if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
+
+        if prefix_actions is not None:
+            if prefix_attention_horizon is None:
+                raise ValueError("prefix_attention_horizon is required when prefix_actions is provided.")
+            prefix_actions = np.asarray(prefix_actions)
+            if prefix_actions.ndim == 2:
+                num_committed = prefix_actions.shape[0]
+            elif prefix_actions.ndim == 3:
+                num_committed = prefix_actions.shape[1]
+            else:
+                raise ValueError(
+                    f"prefix_actions must have shape (c, action_dim) or (1, c, action_dim), got {prefix_actions.shape}"
+                )
+            blend_weight = _make_rtc_blend_weight(
+                self._model.action_horizon, num_committed, prefix_attention_horizon
+            )
+            if self._is_pytorch_model:
+                # NOTE: pi0_pytorch does not yet implement the RTC blend args; passing them
+                # to a PyTorch model will raise inside sample_actions until ported.
+                prefix_actions = torch.from_numpy(prefix_actions).to(self._pytorch_device)[None, ...]
+                blend_weight = torch.from_numpy(blend_weight).to(self._pytorch_device)
+            else:
+                prefix_actions = jnp.asarray(prefix_actions)[None, ...]
+                blend_weight = jnp.asarray(blend_weight)
+            sample_kwargs["prefix_actions"] = prefix_actions
+            sample_kwargs["blend_weight"] = blend_weight
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()

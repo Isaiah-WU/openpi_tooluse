@@ -8,8 +8,10 @@ UR10e 客户端：从策略服务器获取动作，并在真实机器人上执�
    pip install ur_rtde pyrealsense2 numpy
 4. 修改下面 ROBOT_IP 为你 UR10e 的真实 IP
 5. 确认示教器上装了 Robotiq 的 URCap 插件（socket 端口默认 63352）
+6. 使用 `rs-enumerate-devices` 核对 Base/Wrist 相机序列号
 """
 
+import logging
 import socket
 import time
 
@@ -25,6 +27,8 @@ from runtime_timing import ControlCycleTiming
 from timing_recorder import TimingRecorder
 from action_trajectory import resample_action_chunk
 
+logging.basicConfig(level=logging.INFO)
+
 # ========================
 
 ROBOT_IP = "192.168.1.9"           
@@ -34,7 +38,26 @@ GRIPPER_MAX_POS = 255
 HOST_IP = "127.0.0.1"
 HOST_PORT = 8000                     
 
+BASE_CAMERA_SERIAL = "244222070262"
+WRIST_CAMERA_SERIAL = "213522071124"
+
 # ============================================================
+
+CHECKPOINT_PROMPTS = {
+    "pi05_ur10e_demo": (
+        "pour water from the kettle into the cup, "
+        "then move the cup away and wipe the table with the cloth"
+    ),
+    "pi05_ur10e_long_horizon_lora": (
+        "Pick up the yellow cup at the back and place it into the blue cup in the front. "
+        "Lift the nested cups and place them into the blue cup inside the basket. "
+        "Pick up the blue plate at the back and place it onto the blue plate in the front. "
+        "Lift the stacked plates and place them onto the blue plate inside the basket. "
+        "Take the rag and wipe the table."
+    ),
+}
+
+ACTIVE_CHECKPOINT = "pi05_ur10e_long_horizon_lora"
 
 
 class RobotiqGripper:
@@ -64,14 +87,61 @@ class RobotiqGripper:
 rtde_c = None
 rtde_r = None
 gripper = None
-pipeline = None
+base_pipeline = None
+wrist_pipeline = None
+
+
+def _resolve_camera_serials() -> tuple[str, str]:
+    """Return explicitly configured Base and Wrist camera serial numbers."""
+    if BASE_CAMERA_SERIAL and WRIST_CAMERA_SERIAL:
+        if BASE_CAMERA_SERIAL == WRIST_CAMERA_SERIAL:
+            raise ValueError(
+                "Base and Wrist camera serial numbers must be different"
+            )
+
+        return BASE_CAMERA_SERIAL, WRIST_CAMERA_SERIAL
+
+    context = rs.context()
+    detected_serials = [
+        device.get_info(rs.camera_info.serial_number)
+        for device in context.query_devices()
+    ]
+
+    raise RuntimeError(
+        "BASE_CAMERA_SERIAL and WRIST_CAMERA_SERIAL must be configured. "
+        f"Detected RealSense serial numbers: {detected_serials}"
+    )
+
+
+def _start_camera_pipeline(
+    serial: str,
+    label: str,
+) -> rs.pipeline:
+    camera_pipeline = rs.pipeline()
+    camera_config = rs.config()
+    camera_config.enable_device(serial)
+    camera_config.enable_stream(
+        rs.stream.color,
+        640,
+        480,
+        rs.format.bgr8,
+        30,
+    )
+    camera_pipeline.start(camera_config)
+    logging.info(
+        "%s camera pipeline started (serial=%s)",
+        label,
+        serial,
+    )
+    return camera_pipeline
 
 
 def initialize_hardware():
     global rtde_c
     global rtde_r
     global gripper
-    global pipeline
+    global base_pipeline
+    global wrist_pipeline
 
     rtde_c = rtde_control.RTDEControlInterface(
         ROBOT_IP
@@ -83,26 +153,50 @@ def initialize_hardware():
         ROBOT_IP
     )
 
-    pipeline = rs.pipeline()
-
-    camera_config = rs.config()
-    camera_config.enable_stream(
-        rs.stream.color,
-        640,
-        480,
-        rs.format.bgr8,
-        30,
+    base_serial, wrist_serial = (
+        _resolve_camera_serials()
     )
 
-    pipeline.start(camera_config)
+    base_pipeline = _start_camera_pipeline(
+        base_serial,
+        "base",
+    )
+    wrist_pipeline = _start_camera_pipeline(
+        wrist_serial,
+        "wrist",
+    )
 
 
-def get_camera_image():
-    frames = pipeline.wait_for_frames()
+def get_camera_image(
+    camera_pipeline: rs.pipeline,
+) -> np.ndarray:
+    frames = camera_pipeline.wait_for_frames()
     color_frame = frames.get_color_frame()
+
+    if color_frame is None:
+        raise RuntimeError(
+            "RealSense color frame is unavailable"
+        )
+
     img_bgr = np.asanyarray(color_frame.get_data())
     img_rgb = img_bgr[:, :, ::-1]   # BGR -> RGB
     return img_rgb
+
+
+def stop_camera_pipelines():
+    """Stop both RealSense pipelines if they were started."""
+    global base_pipeline
+    global wrist_pipeline
+
+    for camera_pipeline in (
+        base_pipeline,
+        wrist_pipeline,
+    ):
+        if camera_pipeline is not None:
+            camera_pipeline.stop()
+
+    base_pipeline = None
+    wrist_pipeline = None
 
 
 def get_robot_state():
@@ -115,13 +209,26 @@ def get_robot_state():
 def capture_observation(task_instruction):
     observation_start = time.perf_counter()
 
-    img = get_camera_image()
+    if base_pipeline is None or wrist_pipeline is None:
+        raise RuntimeError(
+            "Camera pipelines must be initialized before capture"
+        )
+
+    base_img = get_camera_image(base_pipeline)
+    wrist_img = get_camera_image(wrist_pipeline)
     state = get_robot_state()
 
     observation = {
         "observation/image": image_tools.convert_to_uint8(
             image_tools.resize_with_pad(
-                img,
+                base_img,
+                224,
+                224,
+            )
+        ),
+        "observation/wrist_image": image_tools.convert_to_uint8(
+            image_tools.resize_with_pad(
+                wrist_img,
                 224,
                 224,
             )
@@ -154,10 +261,9 @@ def execute_action(action):
 
 def main_async():
     initialize_hardware()
-    task_instruction = (
-        "pour water from the kettle into the cup, "
-        "then move the cup away and wipe the table with the cloth"
-    )
+    task_instruction = CHECKPOINT_PROMPTS[
+        ACTIVE_CHECKPOINT
+    ]
 
     num_steps = 200
     query_every_n_steps = 10
@@ -376,6 +482,7 @@ def main_async():
         policy.stop()
         recorder.save()
         recorder.print_summary()
+        stop_camera_pipelines()
 
 
 def main():
@@ -383,32 +490,37 @@ def main():
     initialize_hardware()
     client = websocket_client_policy.WebsocketClientPolicy(host=HOST_IP, port=HOST_PORT)
 
-    task_instruction = "pour water from the kettle into the cup, then move the cup away and wipe the table with the cloth"
+    task_instruction = CHECKPOINT_PROMPTS[
+        ACTIVE_CHECKPOINT
+    ]
 
     num_steps = 200          # 想让机器人跑多少个时间步，自己定
     query_every_n_steps = 10  # 每隔多少步重新问一次服务器要新动作（不用每一步都问）
 
     action_chunk = None
 
-    for step in range(num_steps):
-        # 每隔 N 步，或者还没有可用的动作块时，才重新查询服务器
-        if action_chunk is None or step % query_every_n_steps == 0:
-            (
-                observation,
-                observation_start,
-                observation_ready,
-            ) = capture_observation(task_instruction)
+    try:
+        for step in range(num_steps):
+            # 每隔 N 步，或者还没有可用的动作块时，才重新查询服务器
+            if action_chunk is None or step % query_every_n_steps == 0:
+                (
+                    observation,
+                    observation_start,
+                    observation_ready,
+                ) = capture_observation(task_instruction)
 
-            result = client.infer(observation)
-            action_chunk = result["actions"]   # 形状是 (action_horizon, 7)
-            chunk_index = 0
+                result = client.infer(observation)
+                action_chunk = result["actions"]   # 形状是 (action_horizon, 7)
+                chunk_index = 0
 
-        # 从这一块动作序列里，依次取出一步来执行（"开环"执行，直到用完这一块再重新问）
-        action = action_chunk[chunk_index]
-        execute_action(action)
-        chunk_index += 1
+            # 从这一块动作序列里，依次取出一步来执行（"开环"执行，直到用完这一块再重新问）
+            action = action_chunk[chunk_index]
+            execute_action(action)
+            chunk_index += 1
 
-        time.sleep(0.1)   # 按你机器人实际控制频率调整，比如 10Hz 对应 0.1 秒
+            time.sleep(0.1)   # 按你机器人实际控制频率调整，比如 10Hz 对应 0.1 秒
+    finally:
+        stop_camera_pipelines()
 
 
 if __name__ == "__main__":

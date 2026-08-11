@@ -35,6 +35,7 @@ class UR10eInputs(transforms.DataTransformFn):
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(data["observation/image"])
+        wrist_image = _parse_image(data["observation/wrist_image"])
 
         # 下面字典里的 key 名（"state" / "image" / "image_mask" 等）是模型固定要求的，不要改。
         # 需要改的只是等号右边取自 data 的部分，以对应你自己数据集的字段。
@@ -42,14 +43,16 @@ class UR10eInputs(transforms.DataTransformFn):
             "state": data["observation/state"],
             "image": {
                 "base_0_rgb": base_image,
-            # 两路腕部图像都用全零占位，而不是只占位右边这一路
-                "left_wrist_0_rgb": np.zeros_like(base_image),
+                # 真实腕部相机接入 left_wrist_0_rgb；目前只有一路腕部相机，
+                # right_wrist_0_rgb 继续用全零占位（跟 droid_policy.py 的写法一致）。
+                "left_wrist_0_rgb": wrist_image,
                 "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
-                # 两路腕部图都是占位，mask 逻辑也要相应统一处理
-                "left_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
+                # left_wrist_0_rgb 现在是真实图像，mask 打开；right_wrist_0_rgb 仍是
+                # 占位图，除了不遮罩占位图的 PI0_FAST 外都保持 False。
+                "left_wrist_0_rgb": np.True_,
                 "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
             },
         }

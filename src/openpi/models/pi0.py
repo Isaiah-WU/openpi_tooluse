@@ -221,6 +221,8 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        prefix_actions: at.Float[at.Array, "b c ad"] | None = None,
+        blend_weight: at.Float[at.Array, "ah"] | None = None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -229,6 +231,42 @@ class Pi0(_model.BaseModel):
         batch_size = observation.state.shape[0]
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+
+        # RTC-style soft-masked inpainting. When `prefix_actions` (already-committed
+        # actions, e.g. the not-yet-executed tail of the previous chunk) is provided, we
+        # anchor those steps to the committed actions during denoising instead of letting
+        # the model regenerate them freely. `blend_weight[i]` is 1 for strongly committed
+        # positions, decays to 0 over a transition window, and is 0 beyond it. The
+        # straight-line flow-matching velocity toward the committed actions is
+        # `u_t = noise - actions`, which is constant in `t`, so we precompute it once and
+        # reuse it every step. Without both arguments this is a no-op (identical sampler).
+        if prefix_actions is not None:
+            if blend_weight is None:
+                raise ValueError("prefix_actions requires blend_weight to be provided.")
+            blend_weight = jnp.asarray(blend_weight)
+            if blend_weight.shape[-1] != self.action_horizon:
+                raise ValueError(
+                    f"blend_weight must have length action_horizon ({self.action_horizon}), got {blend_weight.shape}"
+                )
+            if prefix_actions.shape[-2] > self.action_horizon:
+                raise ValueError(
+                    f"prefix_actions has {prefix_actions.shape[-2]} steps but action_horizon is {self.action_horizon}"
+                )
+            if prefix_actions.shape[-2] < self.action_horizon:
+                # Pad by repeating the last committed action. Positions beyond the committed
+                # region still carry a non-zero blend_weight inside the decay window, and they
+                # must blend toward a smooth continuation of the committed trajectory rather
+                # than toward the zero vector (which would shrink the sampled actions to zero).
+                pad = self.action_horizon - prefix_actions.shape[-2]
+                last = prefix_actions[..., -1:, :]
+                prefix_actions = jnp.concatenate(
+                    [prefix_actions, jnp.repeat(last, pad, axis=-2)], axis=-2
+                )
+            v_known = noise - prefix_actions
+            blend_weight = blend_weight[None, :, None]  # (1, ah, 1) for broadcasting
+        else:
+            v_known = None
+            blend_weight = None
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
@@ -267,6 +305,13 @@ class Pi0(_model.BaseModel):
             )
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+            if v_known is not None:
+                # RTC soft-masked inpainting: blend the model's predicted velocity toward
+                # the committed-action velocity. Where blend_weight=1 the steps are fully
+                # anchored to already-promised actions; beyond the decay window the model
+                # is free to replan.
+                v_t = blend_weight * v_known + (1.0 - blend_weight) * v_t
 
             return x_t + dt * v_t, time + dt
 

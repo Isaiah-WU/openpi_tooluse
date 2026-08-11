@@ -373,6 +373,7 @@ class LeRobotUR10eDataConfig(DataConfigFactory):
                 _transforms.RepackTransform(
                     {
                         "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
                         "observation/state": "state",
                         "actions": "actions",
                         "prompt": "prompt",
@@ -797,8 +798,8 @@ _CONFIGS = [
         num_train_steps=30_000,
         image_log_interval=1500,
         batch_size=32,      
-        assets_base_dir="/home/wbjsamuel/projects/openpi_demo/assets",
-        checkpoint_base_dir="/home/wbjsamuel/projects/openpi_demo/checkpoints",
+        assets_base_dir="/media/wbjsamuel/data/pi05_long_horizon_task/stats",
+        checkpoint_base_dir="/media/wbjsamuel/data/pi05_long_horizon_task/checkpoints",
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             paligemma_variant="gemma_2b_lora",
