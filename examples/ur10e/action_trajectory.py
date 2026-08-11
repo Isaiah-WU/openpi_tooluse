@@ -140,6 +140,29 @@ def get_policy_action_leftover(
     return policy_actions[start:].copy()
 
 
+def should_request_action_chunk(
+    *,
+    rtc_enabled: bool,
+    inflight: bool,
+    control_step: int,
+    next_query_step: int,
+    prefix_policy_steps: int | None,
+    rtc_query_remaining_policy_steps: int | None,
+) -> bool:
+    """Return whether baseline or RTC scheduling should submit a new request."""
+    if inflight:
+        return False
+    if not rtc_enabled:
+        return control_step >= next_query_step
+    if prefix_policy_steps is None:
+        return True
+    if rtc_query_remaining_policy_steps is None:
+        raise ValueError("RTC requires rtc_query_remaining_policy_steps")
+    if rtc_query_remaining_policy_steps < 0:
+        raise ValueError("rtc_query_remaining_policy_steps must be non-negative")
+    return prefix_policy_steps <= rtc_query_remaining_policy_steps
+
+
 def prepare_action_chunk(
     actions: np.ndarray,
     *,

@@ -93,6 +93,17 @@ def test_rtc_request_uses_policy_rate_prefix() -> None:
     assert kwargs["execution_horizon"] == 10
 
 
+def test_rtc_request_requires_horizon_at_least_delay() -> None:
+    with pytest.raises(ValueError, match="at least inference_delay_steps"):
+        _build_rtc_infer_kwargs(
+            _actions(8),
+            rtc_enabled=True,
+            inference_delay_steps=12,
+            execution_horizon=10,
+            action_dim=7,
+        )
+
+
 @pytest.mark.parametrize("delay", [-1, 1.5, True])
 def test_rtc_request_rejects_invalid_delay(delay: object) -> None:
     with pytest.raises(ValueError, match="inference_delay_steps"):

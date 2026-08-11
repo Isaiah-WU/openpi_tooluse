@@ -12,8 +12,10 @@ UR10e 客户端：从策略服务器获取动作，并在真实机器人上执�
 """
 
 import logging
+import math
 import socket
 import time
+from pathlib import Path
 
 import numpy as np
 import pyrealsense2 as rs
@@ -24,7 +26,10 @@ from openpi_client import image_tools
 from openpi_client import websocket_client_policy
 from action_trajectory import get_policy_action_leftover
 from action_trajectory import prepare_action_chunk
+from action_trajectory import should_request_action_chunk
 from async_policy import AsyncPolicyProcess
+from rtc_calibration import RTCDelayTracker
+from rtc_calibration import validate_rtc_runtime_parameters
 from runtime_timing import ControlCycleTiming
 from timing_recorder import TimingRecorder
 
@@ -52,6 +57,7 @@ USE_ASYNC_RUNTIME = False
 RTC_ENABLED = False
 RTC_INFERENCE_DELAY_POLICY_STEPS = None
 RTC_EXECUTION_HORIZON_POLICY_STEPS = 10
+RTC_QUERY_REMAINING_POLICY_STEPS = None
 
 # ============================================================
 
@@ -272,6 +278,18 @@ def execute_action(action):
 
 
 def main_async():
+    rtc_delay_tracker = None
+    if RTC_ENABLED:
+        validate_rtc_runtime_parameters(
+            inference_delay_policy_steps=RTC_INFERENCE_DELAY_POLICY_STEPS,
+            execution_horizon_policy_steps=RTC_EXECUTION_HORIZON_POLICY_STEPS,
+            query_remaining_policy_steps=RTC_QUERY_REMAINING_POLICY_STEPS,
+            action_horizon_policy_steps=50,
+        )
+        rtc_delay_tracker = RTCDelayTracker(
+            RTC_INFERENCE_DELAY_POLICY_STEPS,
+        )
+
     initialize_hardware()
     task_instruction = CHECKPOINT_PROMPTS[
         ACTIVE_CHECKPOINT
@@ -295,8 +313,16 @@ def main_async():
         rtc_execution_horizon=RTC_EXECUTION_HORIZON_POLICY_STEPS,
     )
 
+    timing_output_dir = (
+        Path("ur10e_timing")
+        / time.strftime("%Y%m%d_%H%M%S")
+    )
+    logging.info(
+        "Runtime timing will be saved to %s",
+        timing_output_dir,
+    )
     recorder = TimingRecorder(
-        "ur10e_timing",
+        timing_output_dir,
     )
 
     action_chunk = None
@@ -390,6 +416,10 @@ def main_async():
                 returned_timing.rtc_skipped_policy_steps = (
                     prepared_chunk.skipped_policy_steps
                 )
+                if rtc_delay_tracker is not None:
+                    rtc_delay_tracker.add(
+                        prepared_chunk.observed_delay_policy_steps
+                    )
 
                 returned_timing.chunk_prepare_end = (
                     time.perf_counter()
@@ -425,10 +455,67 @@ def main_async():
                     returned_timing,
                 )
 
+            prev_chunk_left_over = None
             if (
-                not policy.inflight
-                and step >= next_query_step
+                policy.rtc_enabled
+                and policy_action_chunk is not None
             ):
+                prefix = get_policy_action_leftover(
+                    policy_action_chunk,
+                    consumed_control_steps=chunk_index,
+                    control_hz=control_hz,
+                    policy_hz=policy_action_hz,
+                )
+                if len(prefix) > 0:
+                    prev_chunk_left_over = prefix
+
+            rtc_query_remaining_policy_steps = (
+                RTC_QUERY_REMAINING_POLICY_STEPS
+            )
+            if rtc_delay_tracker is not None:
+                estimated_delay = rtc_delay_tracker.estimate()
+                execution_horizon = max(
+                    RTC_EXECUTION_HORIZON_POLICY_STEPS,
+                    estimated_delay,
+                )
+                policy_steps_per_control = int(
+                    math.ceil(policy_action_hz / control_hz)
+                )
+                rtc_query_remaining_policy_steps = max(
+                    RTC_QUERY_REMAINING_POLICY_STEPS,
+                    estimated_delay
+                    + execution_horizon
+                    + policy_steps_per_control,
+                )
+                validate_rtc_runtime_parameters(
+                    inference_delay_policy_steps=estimated_delay,
+                    execution_horizon_policy_steps=execution_horizon,
+                    query_remaining_policy_steps=(
+                        rtc_query_remaining_policy_steps
+                    ),
+                    action_horizon_policy_steps=50,
+                )
+                policy.configure_rtc_timing(
+                    inference_delay_steps=estimated_delay,
+                    execution_horizon=execution_horizon,
+                )
+
+            request_due = should_request_action_chunk(
+                rtc_enabled=policy.rtc_enabled,
+                inflight=policy.inflight,
+                control_step=step,
+                next_query_step=next_query_step,
+                prefix_policy_steps=(
+                    len(prev_chunk_left_over)
+                    if prev_chunk_left_over is not None
+                    else None
+                ),
+                rtc_query_remaining_policy_steps=(
+                    rtc_query_remaining_policy_steps
+                ),
+            )
+
+            if request_due:
                 (
                     observation,
                     observation_start,
@@ -436,20 +523,6 @@ def main_async():
                 ) = capture_observation(
                     task_instruction,
                 )
-
-                prev_chunk_left_over = None
-                if (
-                    policy.rtc_enabled
-                    and policy_action_chunk is not None
-                ):
-                    prefix = get_policy_action_leftover(
-                        policy_action_chunk,
-                        consumed_control_steps=chunk_index,
-                        control_hz=control_hz,
-                        policy_hz=policy_action_hz,
-                    )
-                    if len(prefix) > 0:
-                        prev_chunk_left_over = prefix
 
                 submitted_timing = policy.submit(
                     observation,

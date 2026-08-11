@@ -38,6 +38,8 @@ def _build_rtc_infer_kwargs(
         or execution_horizon <= 0
     ):
         raise ValueError("RTC requires a positive execution_horizon")
+    if execution_horizon < inference_delay_steps:
+        raise ValueError("RTC execution_horizon must be at least inference_delay_steps")
 
     prefix = np.asarray(prev_chunk_left_over, dtype=np.float32)
     if prefix.ndim != 2 or prefix.shape[1] != action_dim:
@@ -53,6 +55,7 @@ def _build_rtc_infer_kwargs(
         "inference_delay": inference_delay_steps,
         "execution_horizon": execution_horizon,
     }
+
 
 def _fake_infer(
     observation: dict[str, Any],
@@ -244,6 +247,10 @@ class AsyncPolicyProcess:
                 raise ValueError(
                     "rtc_execution_horizon must be positive when RTC is enabled"
                 )
+            if rtc_execution_horizon < rtc_inference_delay_steps:
+                raise ValueError(
+                    "rtc_execution_horizon must be at least rtc_inference_delay_steps"
+                )
 
         self._rtc_enabled = rtc_enabled
         self._rtc_inference_delay_steps = rtc_inference_delay_steps
@@ -325,6 +332,32 @@ class AsyncPolicyProcess:
     def rtc_enabled(self) -> bool:
         """Return whether requests may include RTC prefix guidance."""
         return self._rtc_enabled
+
+    def configure_rtc_timing(
+        self,
+        *,
+        inference_delay_steps: int,
+        execution_horizon: int,
+    ) -> None:
+        """Update timing-only RTC parameters used by subsequent requests."""
+        if not self._rtc_enabled:
+            raise RuntimeError("Cannot configure RTC timing while RTC is disabled")
+        if (
+            not isinstance(inference_delay_steps, int)
+            or isinstance(inference_delay_steps, bool)
+            or inference_delay_steps < 0
+        ):
+            raise ValueError("inference_delay_steps must be a non-negative integer")
+        if (
+            not isinstance(execution_horizon, int)
+            or isinstance(execution_horizon, bool)
+            or execution_horizon <= 0
+            or execution_horizon < inference_delay_steps
+        ):
+            raise ValueError("execution_horizon must be an integer at least as large as the delay")
+
+        self._rtc_inference_delay_steps = inference_delay_steps
+        self._rtc_execution_horizon = execution_horizon
 
     def submit(
         self,
