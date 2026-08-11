@@ -1,3 +1,4 @@
+from collections.abc import Callable
 import logging
 import math
 
@@ -9,6 +10,54 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+from openpi.models_pytorch.rtc_processor import RTCProcessor
+
+
+def _prepare_rtc_sampling(
+    rtc_processor: RTCProcessor | None,
+    prev_chunk_left_over: Tensor | None,
+    inference_delay: int | None,
+) -> tuple[RTCProcessor | None, int]:
+    """Validate RTC inputs and return the processor active for this chunk.
+
+    The first chunk has no previous actions and must use the original sampler,
+    even when an enabled processor is attached to the model.
+    """
+    if prev_chunk_left_over is None:
+        return None, 0
+
+    if rtc_processor is None or not rtc_processor.config.enabled:
+        raise ValueError("prev_chunk_left_over requires an enabled RTCProcessor")
+    if inference_delay is None:
+        raise ValueError("prev_chunk_left_over requires inference_delay")
+    if isinstance(inference_delay, bool) or not isinstance(inference_delay, int) or inference_delay < 0:
+        raise ValueError(f"inference_delay must be a non-negative integer, got {inference_delay}")
+
+    return rtc_processor, inference_delay
+
+
+def _denoise_with_optional_rtc(
+    rtc_processor: RTCProcessor | None,
+    denoiser: Callable[[Tensor], Tensor],
+    x_t: Tensor,
+    *,
+    prev_chunk_left_over: Tensor | None,
+    inference_delay: int,
+    time: Tensor,
+    execution_horizon: int | None,
+) -> Tensor:
+    """Compute one base or RTC-guided reverse-time velocity."""
+    if rtc_processor is None:
+        return denoiser(x_t)
+
+    return rtc_processor.denoise_step(
+        x_t=x_t,
+        previous_chunk_leftover=prev_chunk_left_over,
+        inference_delay=inference_delay,
+        time=time,
+        denoiser=denoiser,
+        execution_horizon=execution_horizon,
+    )
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -99,10 +148,11 @@ def make_att_2d_masks(pad_masks, att_masks):
 
 
 class PI0Pytorch(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, rtc_processor: RTCProcessor | None = None):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
+        self.rtc_processor = rtc_processor
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -538,8 +588,24 @@ class PI0Pytorch(nn.Module):
         return loss
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
-        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+    def sample_actions(
+        self,
+        device,
+        observation,
+        noise=None,
+        num_steps=10,
+        *,
+        prev_chunk_left_over: Tensor | None = None,
+        inference_delay: int | None = None,
+        execution_horizon: int | None = None,
+    ) -> Tensor:
+        """Sample actions, optionally guided by the previous chunk using RTC."""
+        active_rtc_processor, rtc_inference_delay = _prepare_rtc_sampling(
+            self.rtc_processor,
+            prev_chunk_left_over,
+            inference_delay,
+        )
+
         bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
@@ -570,13 +636,33 @@ class PI0Pytorch(nn.Module):
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
-            v_t = self.denoise_step(
-                state,
-                prefix_pad_masks,
-                past_key_values,
-                x_t,
-                expanded_time,
-            )
+            if active_rtc_processor is None:
+                v_t = self.denoise_step(
+                    state,
+                    prefix_pad_masks,
+                    past_key_values,
+                    x_t,
+                    expanded_time,
+                )
+            else:
+                def denoiser(input_x_t):
+                    return self.denoise_step(
+                        state,
+                        prefix_pad_masks,
+                        past_key_values,
+                        input_x_t,
+                        expanded_time,
+                    )
+
+                v_t = _denoise_with_optional_rtc(
+                    active_rtc_processor,
+                    denoiser,
+                    x_t,
+                    prev_chunk_left_over=prev_chunk_left_over,
+                    inference_delay=rtc_inference_delay,
+                    time=time,
+                    execution_horizon=execution_horizon,
+                )
 
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t + dt * v_t
