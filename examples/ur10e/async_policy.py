@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from openpi_client.server_capabilities import add_rtc_server_capability
+from openpi_client.server_capabilities import validate_rtc_server_capability
 from runtime_timing import RequestTiming
 
 
@@ -107,12 +109,15 @@ def _fake_infer(
 def _policy_worker(
     request_queue,
     response_queue,
+    startup_queue,
     stop_event,
     remote_host: str,
     remote_port: int,
     fake_delay_ms: float | None,
     action_horizon: int,
     action_dim: int,
+    rtc_enabled: bool,
+    rtc_execution_horizon: int | None,
 ) -> None:
     """Run blocking policy inference outside the robot control process."""
     policy_client = None
@@ -127,7 +132,37 @@ def _policy_worker(
                     port=remote_port,
                 )
             )
+            server_metadata = policy_client.get_server_metadata()
+        else:
+            server_metadata = add_rtc_server_capability(
+                {},
+                rtc_enabled=rtc_enabled,
+                execution_horizon=rtc_execution_horizon or 1,
+                prefix_attention_schedule="exp",
+                max_guidance_weight=10.0,
+            )
 
+        validate_rtc_server_capability(
+            server_metadata,
+            rtc_requested=rtc_enabled,
+        )
+        startup_queue.put(
+            {
+                "ok": True,
+                "server_metadata": server_metadata,
+            }
+        )
+
+    except Exception:
+        startup_queue.put(
+            {
+                "ok": False,
+                "error": traceback.format_exc(),
+            }
+        )
+        return
+
+    try:
         while not stop_event.is_set():
             try:
                 request = request_queue.get(timeout=0.05)
@@ -206,6 +241,7 @@ def _policy_worker(
             }
         )
 
+
 class AsyncPolicyProcess:
     """Manage one policy inference worker process."""
 
@@ -265,6 +301,9 @@ class AsyncPolicyProcess:
         self._response_queue = self._ctx.Queue(
             maxsize=4,
         )
+        self._startup_queue = self._ctx.Queue(
+            maxsize=1,
+        )
         self._stop_event = self._ctx.Event()
 
         self._process = self._ctx.Process(
@@ -272,12 +311,15 @@ class AsyncPolicyProcess:
             args=(
                 self._request_queue,
                 self._response_queue,
+                self._startup_queue,
                 self._stop_event,
                 remote_host,
                 remote_port,
                 fake_delay_ms,
                 action_horizon,
                 action_dim,
+                rtc_enabled,
+                rtc_execution_horizon,
             ),
             daemon=True,
         )
@@ -285,15 +327,33 @@ class AsyncPolicyProcess:
         self._next_request_id = 0
         self._latest_request_id = -1
         self._inflight = False
+        self._server_metadata: dict[str, Any] | None = None
 
-    def start(self) -> None:
-        """Start the policy inference worker process."""
+    def start(self, *, timeout_s: float = 30.0) -> None:
+        """Start the worker and finish the server capability handshake."""
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
         if self._process.pid is not None:
             raise RuntimeError(
                 "AsyncPolicyProcess can only be started once"
             )
 
         self._process.start()
+        try:
+            startup = self._startup_queue.get(timeout=timeout_s)
+        except queue.Empty as exc:
+            self.stop()
+            raise TimeoutError(
+                f"Timed out after {timeout_s:.1f}s waiting for policy server metadata"
+            ) from exc
+
+        if not startup["ok"]:
+            self.stop()
+            raise RuntimeError(
+                "Policy worker startup failed:\n"
+                f"{startup['error']}"
+            )
+        self._server_metadata = startup["server_metadata"]
 
     def stop(self) -> None:
         """Stop the policy inference worker process."""
@@ -332,6 +392,13 @@ class AsyncPolicyProcess:
     def rtc_enabled(self) -> bool:
         """Return whether requests may include RTC prefix guidance."""
         return self._rtc_enabled
+
+    @property
+    def server_metadata(self) -> dict[str, Any]:
+        """Return metadata verified during worker startup."""
+        if self._server_metadata is None:
+            raise RuntimeError("Policy worker has not completed startup")
+        return self._server_metadata
 
     def configure_rtc_timing(
         self,

@@ -30,6 +30,7 @@ from action_trajectory import should_request_action_chunk
 from async_policy import AsyncPolicyProcess
 from rtc_calibration import RTCDelayTracker
 from rtc_calibration import validate_rtc_runtime_parameters
+from runtime_config import UR10eRuntimeConfig
 from runtime_safety import request_execution_arm
 from runtime_timing import ControlCycleTiming
 from timing_recorder import TimingRecorder
@@ -48,22 +49,30 @@ HOST_PORT = 8000
 BASE_CAMERA_SERIAL = "244222070262"
 WRIST_CAMERA_SERIAL = "213522071124"
 
-# Keep the established synchronous entry point as the safe default. Set this
-# to True to collect asynchronous timing and, later, execute RTC requests.
-USE_ASYNC_RUNTIME = False
+RUNTIME_CONFIG = UR10eRuntimeConfig.from_env()
+
+# Environment overrides avoid editing source between baseline and RTC runs.
+# The checked-in defaults remain synchronous, non-RTC, and motion-disabled.
+USE_ASYNC_RUNTIME = RUNTIME_CONFIG.use_async_runtime
 
 # False performs real observation and inference timing without creating an
-# RTDE control connection or sending arm/gripper actuation commands. Motion additionally
-# requires an exact interactive arming phrase at startup.
-ROBOT_ACTIONS_ENABLED = False
+# RTDE control connection or sending arm/gripper actuation commands. Motion
+# additionally requires an exact interactive arming phrase at startup.
+ROBOT_ACTIONS_ENABLED = RUNTIME_CONFIG.robot_actions_enabled
 
 # RTC stays opt-in until request_timing.csv provides a stable delay estimate.
 # Set the estimate in policy-rate (30 Hz) steps, preferably from the measured
 # P95 observed_delay_policy_steps rather than from a single request.
-RTC_ENABLED = False
-RTC_INFERENCE_DELAY_POLICY_STEPS = None
-RTC_EXECUTION_HORIZON_POLICY_STEPS = 10
-RTC_QUERY_REMAINING_POLICY_STEPS = None
+RTC_ENABLED = RUNTIME_CONFIG.rtc_enabled
+RTC_INFERENCE_DELAY_POLICY_STEPS = (
+    RUNTIME_CONFIG.rtc_inference_delay_policy_steps
+)
+RTC_EXECUTION_HORIZON_POLICY_STEPS = (
+    RUNTIME_CONFIG.rtc_execution_horizon_policy_steps
+)
+RTC_QUERY_REMAINING_POLICY_STEPS = (
+    RUNTIME_CONFIG.rtc_query_remaining_policy_steps
+)
 
 # ============================================================
 

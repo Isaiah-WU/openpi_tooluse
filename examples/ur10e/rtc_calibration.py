@@ -223,18 +223,20 @@ def main() -> None:
         f"p95={recommendation.delay_p95:.3f} "
         f"p99={recommendation.delay_p99:.3f}"
     )
-    print("Set these values in examples/ur10e/ur10e_client.py:")
-    print("RTC_ENABLED = True")
+    print("Use these environment variables for the RTC dry-run:")
+    print("export OPENPI_UR10E_ASYNC=1")
+    print("export OPENPI_UR10E_EXECUTE_ACTIONS=0")
+    print("export OPENPI_UR10E_RTC=1")
     print(
-        "RTC_INFERENCE_DELAY_POLICY_STEPS = "
+        "export OPENPI_UR10E_RTC_DELAY="
         f"{recommendation.inference_delay_policy_steps}"
     )
     print(
-        "RTC_EXECUTION_HORIZON_POLICY_STEPS = "
+        "export OPENPI_UR10E_RTC_EXECUTION_HORIZON="
         f"{recommendation.execution_horizon_policy_steps}"
     )
     print(
-        "RTC_QUERY_REMAINING_POLICY_STEPS = "
+        "export OPENPI_UR10E_RTC_QUERY_REMAINING="
         f"{recommendation.query_remaining_policy_steps}"
     )
 

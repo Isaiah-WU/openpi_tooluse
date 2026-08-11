@@ -5,6 +5,7 @@ import socket
 
 import tyro
 
+from openpi_client.server_capabilities import add_rtc_server_capability
 from openpi.models_pytorch.rtc_processor import RTCInferenceConfig
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
@@ -118,7 +119,13 @@ def create_policy(args: Args) -> _policy.Policy:
 
 def main(args: Args) -> None:
     policy = create_policy(args)
-    policy_metadata = policy.metadata
+    policy_metadata = add_rtc_server_capability(
+        policy.metadata,
+        rtc_enabled=args.rtc.enabled,
+        execution_horizon=args.rtc.execution_horizon,
+        prefix_attention_schedule=args.rtc.prefix_attention_schedule,
+        max_guidance_weight=args.rtc.max_guidance_weight,
+    )
 
     # Record the policy's behavior.
     if args.record:
