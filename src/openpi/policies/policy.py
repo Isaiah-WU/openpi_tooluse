@@ -98,10 +98,29 @@ class Policy(BasePolicy):
         noise: np.ndarray | None = None,
         prefix_actions: np.ndarray | None = None,
         prefix_attention_horizon: int | None = None,
+        prev_chunk_left_over: np.ndarray | None = None,
+        inference_delay: int | None = None,
+        execution_horizon: int | None = None,
     ) -> dict:  # type: ignore[misc]
+        if prefix_actions is not None and prev_chunk_left_over is not None:
+            raise ValueError("prefix_actions and prev_chunk_left_over cannot be used together")
+
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+        if prev_chunk_left_over is not None:
+            # Client actions are in the robot/output space. Put them through the
+            # same action transforms as training so RTC operates in normalized,
+            # model-padded action space rather than raw UR10e units.
+            if "actions" in inputs:
+                raise ValueError("observation already contains actions; cannot inject prev_chunk_left_over")
+            inputs["actions"] = np.asarray(prev_chunk_left_over)
+
         inputs = self._input_transform(inputs)
+        if prev_chunk_left_over is not None:
+            if "actions" not in inputs:
+                raise ValueError("input transforms removed prev_chunk_left_over actions")
+            prev_chunk_left_over = np.asarray(inputs.pop("actions"))
+
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
@@ -145,6 +164,26 @@ class Policy(BasePolicy):
                 blend_weight = jnp.asarray(blend_weight)
             sample_kwargs["prefix_actions"] = prefix_actions
             sample_kwargs["blend_weight"] = blend_weight
+
+        if prev_chunk_left_over is not None:
+            if not self._is_pytorch_model:
+                raise ValueError("prev_chunk_left_over VJP guidance requires a PyTorch policy")
+            if inference_delay is None:
+                raise ValueError("prev_chunk_left_over requires inference_delay")
+            if prev_chunk_left_over.ndim == 2:
+                prev_chunk_left_over = prev_chunk_left_over[None, ...]
+            elif prev_chunk_left_over.ndim != 3 or prev_chunk_left_over.shape[0] != 1:
+                raise ValueError(
+                    "prev_chunk_left_over must have shape (steps, action_dim) or (1, steps, action_dim), "
+                    f"got {prev_chunk_left_over.shape}"
+                )
+
+            sample_kwargs["prev_chunk_left_over"] = torch.from_numpy(
+                np.ascontiguousarray(prev_chunk_left_over)
+            ).to(self._pytorch_device)
+            sample_kwargs["inference_delay"] = inference_delay
+            if execution_horizon is not None:
+                sample_kwargs["execution_horizon"] = execution_horizon
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()

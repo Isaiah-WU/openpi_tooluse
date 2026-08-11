@@ -6,11 +6,26 @@ from typing import Any
 import jax.numpy as jnp
 
 import openpi.models.model as _model
+from openpi.models_pytorch.rtc_processor import RTCInferenceConfig
+from openpi.models_pytorch.rtc_processor import RTCProcessor
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
 import openpi.transforms as transforms
+
+
+def _create_rtc_processor(
+    rtc_config: RTCInferenceConfig | None,
+    *,
+    is_pytorch: bool,
+) -> RTCProcessor | None:
+    """Create RTC only for an explicitly enabled PyTorch policy."""
+    if rtc_config is None or not rtc_config.enabled:
+        return None
+    if not is_pytorch:
+        raise ValueError("Inference-time RTC is currently supported only for PyTorch checkpoints")
+    return RTCProcessor(rtc_config)
 
 
 def create_trained_policy(
@@ -22,6 +37,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    rtc_config: RTCInferenceConfig | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -37,6 +53,8 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        rtc_config: Optional inference-time RTC configuration. RTC remains disabled when omitted
+            or when ``rtc_config.enabled`` is false.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -48,10 +66,18 @@ def create_trained_policy(
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
+    rtc_processor = _create_rtc_processor(
+        rtc_config,
+        is_pytorch=is_pytorch,
+    )
 
     logging.info("Loading model...")
     if is_pytorch:
-        model = train_config.model.load_pytorch(train_config, weight_path)
+        model = train_config.model.load_pytorch(
+            train_config,
+            weight_path,
+            rtc_processor=rtc_processor,
+        )
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))

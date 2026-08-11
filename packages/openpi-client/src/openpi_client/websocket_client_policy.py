@@ -50,8 +50,33 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         *,
         prefix_actions=None,
         prefix_attention_horizon=None,
+        prev_chunk_left_over=None,
+        inference_delay=None,
+        execution_horizon=None,
     ) -> Dict:  # noqa: UP006
-        if prefix_actions is None:
+        if prefix_actions is not None and prev_chunk_left_over is not None:
+            raise ValueError("prefix_actions and prev_chunk_left_over cannot be used together")
+
+        infer_kwargs = {}
+        if prefix_actions is not None:
+            infer_kwargs.update(
+                {
+                    "prefix_actions": prefix_actions,
+                    "prefix_attention_horizon": prefix_attention_horizon,
+                }
+            )
+        if prev_chunk_left_over is not None:
+            if inference_delay is None:
+                raise ValueError("prev_chunk_left_over requires inference_delay")
+            infer_kwargs.update(
+                {
+                    "prev_chunk_left_over": prev_chunk_left_over,
+                    "inference_delay": inference_delay,
+                    "execution_horizon": execution_horizon,
+                }
+            )
+
+        if not infer_kwargs:
             # Common path: send the observation as-is (byte-identical to the original
             # protocol, so older servers keep working).
             data = self._packer.pack(obs)
@@ -61,10 +86,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
             data = self._packer.pack(
                 {
                     "observation": obs,
-                    "infer_kwargs": {
-                        "prefix_actions": prefix_actions,
-                        "prefix_attention_horizon": prefix_attention_horizon,
-                    },
+                    "infer_kwargs": infer_kwargs,
                 }
             )
         self._ws.send(data)
