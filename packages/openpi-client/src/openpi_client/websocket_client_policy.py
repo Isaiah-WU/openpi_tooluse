@@ -49,6 +49,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         obs: Dict,
         *,
         prefix_actions=None,
+        num_committed_actions=None,
         prefix_attention_horizon=None,
     ) -> Dict:  # noqa: UP006
         if prefix_actions is None:
@@ -63,6 +64,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                     "observation": obs,
                     "infer_kwargs": {
                         "prefix_actions": prefix_actions,
+                        "num_committed_actions": num_committed_actions,
                         "prefix_attention_horizon": prefix_attention_horizon,
                     },
                 }

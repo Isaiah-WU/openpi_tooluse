@@ -1,9 +1,21 @@
+import numpy as np
 from openpi_client import action_chunk_broker
 import pytest
 
 from openpi.policies import aloha_policy
+from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.training import config as _config
+
+
+def test_make_rtc_blend_weight_separates_frozen_and_overlap_regions():
+    weight = _policy._make_rtc_blend_weight(  # noqa: SLF001
+        action_horizon=6,
+        num_committed=2,
+        prefix_attention_horizon=4,
+    )
+
+    np.testing.assert_allclose(weight, np.array([1.0, 1.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float32))
 
 
 @pytest.mark.manual

@@ -1,5 +1,6 @@
 import logging
 import threading
+from collections import deque
 from typing import Dict
 
 import numpy as np
@@ -150,84 +151,238 @@ class PipelinedActionChunkBroker(_base_policy.BasePolicy):
         self._cur_step = 0
 
 
-class RtcActionChunkBroker(PipelinedActionChunkBroker):
-    """Pipelined chunk broker that smooths chunk switches via RTC-style inpainting.
+class RtcActionChunkBroker(_base_policy.BasePolicy):
+    """Runs action-chunk inference asynchronously with RTC-style trajectory guidance.
 
-    On top of PipelinedActionChunkBroker (which prefetches the next chunk in a background
-    thread), this broker also hands the not-yet-executed tail of the current chunk to the
-    policy as `prefix_actions` when prefetching. The policy anchors the head of the new
-    chunk to that committed tail with a blend weight that is 1 over the committed region
-    and decays to 0 over `prefix_attention_horizon`, so the switch is a smooth
-    continuation instead of a hard jump. This is the real-time chunking (RTC) idea from
-    the pi0.5 line of work, applied to the flow-matching sampler.
+    ``prediction_horizon`` is the number of actions returned by the model, while
+    ``execution_horizon`` is the minimum number of controller steps between replans.
+    Keeping them separate is important: a model may predict 50 actions while the robot
+    starts replanning every 10 controller steps.
 
-    Note: `prefix_attention_horizon` must land inside the wrapped policy's contract (it
-    is forwarded to Policy.infer); it defaults to the full action horizon.
+    A new chunk is aligned to the old chunk at the action that is current when prefetch
+    starts. While inference runs, the broker continues consuming the old chunk. If
+    inference takes ``d`` controller steps, the broker starts consuming the new chunk at
+    index ``d``. Thus, the prefix used to guide inference is never replayed on the robot.
     """
 
     def __init__(
         self,
         policy: _base_policy.BasePolicy,
-        action_horizon: int,
-        replan_trigger_step: int | None = None,
+        prediction_horizon: int,
+        execution_horizon: int,
+        *,
         prefix_attention_horizon: int | None = None,
+        initial_delay_steps: int = 1,
+        delay_history_size: int = 5,
     ):
-        super().__init__(policy, action_horizon, replan_trigger_step)
-        # Where the blend weight decays to zero (fully free replanning). The strongly
-        # committed length is implicit: how many steps of the current chunk remain at
-        # prefetch time (action_horizon - replan_trigger_step).
-        self._prefix_attention_horizon = (
-            prefix_attention_horizon if prefix_attention_horizon is not None else action_horizon
-        )
-        # Last action of the previous chunk, used to log the joint-space L2 jump at each
-        # switch (an objective proxy for how smooth the chunk transitions are).
-        self._prev_last_action: np.ndarray | None = None
+        if prediction_horizon <= 1:
+            raise ValueError(f"prediction_horizon must be greater than 1, got {prediction_horizon}")
+        if not 1 <= execution_horizon < prediction_horizon:
+            raise ValueError(
+                f"execution_horizon ({execution_horizon}) must be in "
+                f"[1, prediction_horizon={prediction_horizon})"
+            )
+        if prefix_attention_horizon is not None and not 1 <= prefix_attention_horizon <= prediction_horizon:
+            raise ValueError(
+                f"prefix_attention_horizon ({prefix_attention_horizon}) must be in "
+                f"[1, prediction_horizon={prediction_horizon}]"
+            )
+        if not 1 <= initial_delay_steps < prediction_horizon:
+            raise ValueError(
+                f"initial_delay_steps ({initial_delay_steps}) must be in "
+                f"[1, prediction_horizon={prediction_horizon})"
+            )
+        if delay_history_size <= 0:
+            raise ValueError(f"delay_history_size must be positive, got {delay_history_size}")
+
+        self._policy = policy
+        self._prediction_horizon = prediction_horizon
+        self._execution_horizon = execution_horizon
+        self._prefix_attention_horizon = prefix_attention_horizon
+        self._delay_steps = deque([initial_delay_steps], maxlen=delay_history_size)
+
+        self._current_results: Dict[str, np.ndarray] | None = None
+        self._current_index = 0
+        self._steps_since_switch = 0
+        self._last_emitted_action: np.ndarray | None = None
+
+        self._lock = threading.Lock()
+        self._pending_thread: threading.Thread | None = None
+        self._next_results: Dict[str, np.ndarray] | None = None
+        self._prefetch_start_index: int | None = None
+        self._prefetch_failed = False
+
+    def _validate_chunk(self, results: Dict, *, source: str) -> None:
+        if "actions" not in results:
+            raise ValueError(f"{source} policy result does not contain an 'actions' field")
+        actions = np.asarray(results["actions"])
+        if actions.ndim < 2:
+            raise ValueError(f"{source} actions must have shape (horizon, action_dim), got {actions.shape}")
+        if actions.shape[0] != self._prediction_horizon:
+            raise ValueError(
+                f"{source} policy returned {actions.shape[0]} actions, but prediction_horizon is "
+                f"{self._prediction_horizon}"
+            )
+
+    def _load_initial_chunk(self, obs: Dict) -> None:
+        results = self._policy.infer(obs)
+        self._validate_chunk(results, source="initial")
+        self._current_results = results
+        self._current_index = 0
+        self._steps_since_switch = 0
 
     def _start_prefetch(self, obs: Dict) -> None:
-        # Snapshot the committed tail of the current chunk on the main thread before the
-        # worker starts. This is read-only w.r.t. the main thread (which only slices the
-        # same array), so there is no write race.
-        committed_actions = self._last_results["actions"][self._replan_trigger_step :, ...]
-        self._prev_last_action = self._last_results["actions"][self._action_horizon - 1, ...]
+        assert self._current_results is not None
+        assert self._pending_thread is None
+
+        self._prefetch_start_index = self._current_index
+        prefix_actions = np.asarray(self._current_results["actions"])[self._prefetch_start_index :].copy()
+        overlap_horizon = prefix_actions.shape[0]
+        if overlap_horizon == 0:
+            return
+
+        attention_horizon = overlap_horizon
+        if self._prefix_attention_horizon is not None:
+            attention_horizon = min(attention_horizon, self._prefix_attention_horizon)
+        estimated_delay_steps = min(max(self._delay_steps), attention_horizon)
+        self._prefetch_failed = False
 
         def worker():
             try:
                 results = self._policy.infer(
                     obs,
-                    prefix_actions=committed_actions,
-                    prefix_attention_horizon=self._prefix_attention_horizon,
+                    prefix_actions=prefix_actions,
+                    num_committed_actions=estimated_delay_steps,
+                    prefix_attention_horizon=attention_horizon,
                 )
+                self._validate_chunk(results, source="RTC prefetch")
             except Exception:
                 logger.exception("RTC prefetch inference call failed; will fall back to a blocking call.")
+                with self._lock:
+                    self._prefetch_failed = True
                 return
             with self._lock:
                 self._next_results = results
 
         self._pending_thread = threading.Thread(target=worker, daemon=True)
         self._pending_thread.start()
+        logger.info(
+            "RTC prefetch started at chunk index %d (overlap=%d, estimated_delay=%d, attention_horizon=%d)",
+            self._prefetch_start_index,
+            overlap_horizon,
+            estimated_delay_steps,
+            attention_horizon,
+        )
 
-    def _await_prefetch(self, obs: Dict) -> None:
+    def _take_ready_results(self) -> Dict[str, np.ndarray] | None:
+        with self._lock:
+            if self._next_results is None:
+                return None
+            results = self._next_results
+            self._next_results = None
+        return results
+
+    def _switch_to_prefetched_chunk(self, new_results: Dict[str, np.ndarray]) -> None:
+        assert self._prefetch_start_index is not None
+        actual_delay_steps = self._current_index - self._prefetch_start_index
+        if not 0 <= actual_delay_steps < self._prediction_horizon:
+            raise RuntimeError(
+                f"RTC time alignment produced invalid delay {actual_delay_steps}; "
+                f"current_index={self._current_index}, prefetch_start_index={self._prefetch_start_index}"
+            )
+
+        next_action = np.asarray(new_results["actions"])[actual_delay_steps]
+        if self._last_emitted_action is not None:
+            joint_l2 = float(np.linalg.norm(self._last_emitted_action - next_action))
+            logger.info(
+                "RTC chunk switch: actual_delay_steps=%d, new_chunk_index=%d, joint L2 jump=%.4f",
+                actual_delay_steps,
+                actual_delay_steps,
+                joint_l2,
+            )
+
+        self._delay_steps.append(max(1, actual_delay_steps))
+        self._current_results = new_results
+        # Indices [0, actual_delay_steps) correspond to actions that were consumed from
+        # the old chunk while inference was running. Skip them instead of replaying them.
+        self._current_index = actual_delay_steps
+        self._steps_since_switch = 0
+        self._pending_thread = None
+        self._prefetch_start_index = None
+        self._prefetch_failed = False
+
+    def _finish_or_fallback(self, obs: Dict) -> None:
         if self._pending_thread is not None:
             self._pending_thread.join()
+        new_results = self._take_ready_results()
+        if new_results is not None:
+            self._switch_to_prefetched_chunk(new_results)
+            return
+
+        # The current chunk is exhausted and RTC prefetch failed (or was never started).
+        # Make a normal blocking request so control can continue without replaying stale
+        # actions. This is deliberately visible in logs because this transition is not RTC.
+        logger.warning("RTC chunk unavailable at exhaustion; using a blocking non-RTC inference call.")
+        self._pending_thread = None
+        self._prefetch_start_index = None
+        self._prefetch_failed = False
+        self._load_initial_chunk(obs)
+
+    @override
+    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+        if self._current_results is None:
+            self._load_initial_chunk(obs)
+
+        ready_results = self._take_ready_results()
+        if ready_results is not None:
+            self._switch_to_prefetched_chunk(ready_results)
+
+        if self._current_index >= self._prediction_horizon:
+            self._finish_or_fallback(obs)
+
+        if (
+            self._pending_thread is not None
+            and not self._pending_thread.is_alive()
+            and self._next_results is None
+            and self._prefetch_failed
+        ):
+            # Preserve the current chunk until it is exhausted. A blocking fallback at
+            # exhaustion is safer than repeatedly launching failed background requests.
             self._pending_thread = None
-        with self._lock:
-            new_results = self._next_results
-            self._next_results = None
-        self._cur_step = 0
-        if new_results is None:
-            # Prefetch never ran or failed -- fall back to a plain blocking call. No RTC
-            # anchor, so this switch is a plain hard switch.
-            new_results = self._policy.infer(obs)
-            self._cur_step = 0
-        if self._prev_last_action is not None:
-            first_new = new_results["actions"][0, ...]
-            joint_l2 = float(
-                np.linalg.norm(np.asarray(self._prev_last_action) - np.asarray(first_new))
-            )
-            logger.info(f"chunk switch joint L2 jump = {joint_l2:.4f}")
-        self._last_results = new_results
+
+        if (
+            self._pending_thread is None
+            and not self._prefetch_failed
+            and self._steps_since_switch >= self._execution_horizon
+            and self._current_index < self._prediction_horizon
+        ):
+            self._start_prefetch(obs)
+
+        assert self._current_results is not None
+        index = self._current_index
+
+        def slicer(value):
+            if isinstance(value, np.ndarray) and value.ndim > 0 and value.shape[0] == self._prediction_horizon:
+                return value[index, ...]
+            return value
+
+        results = tree.map_structure(slicer, self._current_results)
+        self._last_emitted_action = np.asarray(self._current_results["actions"])[index].copy()
+        self._current_index += 1
+        self._steps_since_switch += 1
+        return results
 
     @override
     def reset(self) -> None:
-        super().reset()
-        self._prev_last_action = None
+        self._policy.reset()
+        if self._pending_thread is not None:
+            self._pending_thread.join()
+        with self._lock:
+            self._next_results = None
+        self._current_results = None
+        self._current_index = 0
+        self._steps_since_switch = 0
+        self._last_emitted_action = None
+        self._pending_thread = None
+        self._prefetch_start_index = None
+        self._prefetch_failed = False

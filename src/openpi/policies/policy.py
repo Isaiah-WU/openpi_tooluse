@@ -97,6 +97,7 @@ class Policy(BasePolicy):
         *,
         noise: np.ndarray | None = None,
         prefix_actions: np.ndarray | None = None,
+        num_committed_actions: int | None = None,
         prefix_attention_horizon: int | None = None,
     ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
@@ -125,12 +126,22 @@ class Policy(BasePolicy):
                 raise ValueError("prefix_attention_horizon is required when prefix_actions is provided.")
             prefix_actions = np.asarray(prefix_actions)
             if prefix_actions.ndim == 2:
-                num_committed = prefix_actions.shape[0]
+                prefix_length = prefix_actions.shape[0]
             elif prefix_actions.ndim == 3:
-                num_committed = prefix_actions.shape[1]
+                prefix_length = prefix_actions.shape[1]
             else:
                 raise ValueError(
                     f"prefix_actions must have shape (c, action_dim) or (1, c, action_dim), got {prefix_actions.shape}"
+                )
+            num_committed = prefix_length if num_committed_actions is None else num_committed_actions
+            if not 0 <= num_committed <= prefix_length:
+                raise ValueError(
+                    f"num_committed_actions ({num_committed}) must be in [0, prefix length={prefix_length}]"
+                )
+            if prefix_attention_horizon > prefix_length:
+                raise ValueError(
+                    f"prefix_attention_horizon ({prefix_attention_horizon}) cannot exceed "
+                    f"prefix length ({prefix_length})"
                 )
             blend_weight = _make_rtc_blend_weight(
                 self._model.action_horizon, num_committed, prefix_attention_horizon
