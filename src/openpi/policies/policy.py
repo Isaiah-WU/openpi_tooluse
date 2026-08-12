@@ -276,6 +276,20 @@ class Policy(BasePolicy):
             lambda value: torch.as_tensor(np.asarray(value), device=self._pytorch_device),
             model_config.fake_obs(batch_size=1),
         )
+        fake_observation = _model.Observation(
+            images={
+                key: image.permute(0, 3, 1, 2).contiguous()
+                if image.ndim == 4 and image.shape[-1] == 3
+                else image
+                for key, image in fake_observation.images.items()
+            },
+            image_masks=fake_observation.image_masks,
+            state=fake_observation.state,
+            tokenized_prompt=fake_observation.tokenized_prompt,
+            tokenized_prompt_mask=fake_observation.tokenized_prompt_mask,
+            token_ar_mask=fake_observation.token_ar_mask,
+            token_loss_mask=fake_observation.token_loss_mask,
+        )
 
         def synchronize() -> None:
             if str(self._pytorch_device).startswith("cuda"):

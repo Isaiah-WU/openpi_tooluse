@@ -48,12 +48,19 @@ class _FakePytorchModel:
     def __init__(self):
         self.sample_kwargs = None
         self.sample_kwargs_history = []
+        self.sample_observations = []
         self.config = SimpleNamespace(
             action_horizon=2,
             action_dim=3,
-            fake_obs=lambda batch_size: {
-                "state": np.zeros((batch_size, 3), dtype=np.float32),
-            },
+            fake_obs=lambda batch_size: _model.Observation(
+                images={
+                    "base_0_rgb": np.zeros((batch_size, 4, 5, 3), dtype=np.float32),
+                },
+                image_masks={
+                    "base_0_rgb": np.ones((batch_size,), dtype=bool),
+                },
+                state=np.zeros((batch_size, 3), dtype=np.float32),
+            ),
         )
 
     def to(self, _device):
@@ -65,8 +72,8 @@ class _FakePytorchModel:
     def sample_actions(self, _device, observation, **kwargs):
         self.sample_kwargs = kwargs
         self.sample_kwargs_history.append(kwargs)
-        state = observation["state"] if isinstance(observation, dict) else observation.state
-        return torch.zeros(state.shape[0], 2, 3)
+        self.sample_observations.append(observation)
+        return torch.zeros(observation.state.shape[0], 2, 3)
 
 
 def _normalize_and_pad_prefix(data):
@@ -143,6 +150,7 @@ def test_policy_rtc_warmup_discards_baseline_and_varies_scalar_tensors():
     assert len(timings) == 3
     assert all(seconds >= 0 for seconds in timings)
     assert model.sample_kwargs_history[0] == {}
+    assert model.sample_observations[0].images["base_0_rgb"].shape == (1, 3, 4, 5)
     first_rtc, second_rtc = model.sample_kwargs_history[1:]
     assert first_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
     assert second_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
