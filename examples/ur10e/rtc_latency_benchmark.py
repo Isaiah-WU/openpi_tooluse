@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import datetime
 from pathlib import Path
+import time
 
+from openpi_client.rtc_latency_benchmark import IncrementalRTCLatencyWriter
 from openpi_client.rtc_latency_benchmark import recommend_from_rtc_latency
 from openpi_client.rtc_latency_benchmark import run_rtc_latency_benchmark
-from openpi_client.rtc_latency_benchmark import save_rtc_latency_samples
 from openpi_client.websocket_client_policy import WebsocketClientPolicy
 from openpi.policies.ur10e_policy import make_ur10e_rtc_warmup_observation
 
@@ -27,15 +28,39 @@ def main() -> None:
     timestamp = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_path = args.output or Path("rtc_latency_benchmarks") / timestamp / "rtc_latency.csv"
     policy = WebsocketClientPolicy(host=args.server_host, port=args.server_port)
-    try:
-        samples = run_rtc_latency_benchmark(
-            policy,
-            make_ur10e_rtc_warmup_observation(),
-            sample_count=args.samples,
-            policy_hz=args.policy_hz,
+    completed_samples = 0
+    benchmark_started = time.perf_counter()
+
+    def report_sample(sample) -> None:
+        nonlocal completed_samples
+        writer.write(sample)
+        completed_samples += 1
+        print(
+            f"progress={completed_samples}/{args.samples} "
+            f"rtc_total_ms={sample.rtc_total_ms:.3f} "
+            f"delay_steps={sample.observed_delay_policy_steps:.3f} "
+            f"elapsed_s={time.perf_counter() - benchmark_started:.1f}",
+            flush=True,
         )
-        save_rtc_latency_samples(output_path, samples)
+
+    try:
+        print(f"output={output_path}", flush=True)
+        print("baseline=requesting (excluded from RTC samples)", flush=True)
+        with IncrementalRTCLatencyWriter(output_path) as writer:
+            samples = run_rtc_latency_benchmark(
+                policy,
+                make_ur10e_rtc_warmup_observation(),
+                sample_count=args.samples,
+                policy_hz=args.policy_hz,
+                on_sample=report_sample,
+            )
         recommendation = recommend_from_rtc_latency(samples)
+    except KeyboardInterrupt:
+        print(
+            f"interrupted: completed_samples={completed_samples}; partial_csv={output_path}",
+            flush=True,
+        )
+        return
     finally:
         policy.close()
 

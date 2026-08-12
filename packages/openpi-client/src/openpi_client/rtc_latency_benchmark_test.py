@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from openpi_client.rtc_latency_benchmark import RTCLatencySample
+from openpi_client.rtc_latency_benchmark import IncrementalRTCLatencyWriter
 from openpi_client.rtc_latency_benchmark import recommend_from_rtc_latency
 from openpi_client.rtc_latency_benchmark import run_rtc_latency_benchmark
 from openpi_client.rtc_latency_benchmark import save_rtc_latency_samples
@@ -52,11 +53,13 @@ def test_benchmark_excludes_baseline_and_recursively_uses_rtc_chunks():
     observation = {"observation/state": np.zeros(7, dtype=np.float32)}
     clock = iter([0.0, 0.1, 1.0, 1.2])
 
+    reported = []
     samples = run_rtc_latency_benchmark(
         policy,
         observation,
         sample_count=2,
         clock=lambda: next(clock),
+        on_sample=reported.append,
     )
 
     assert len(policy.calls) == 3
@@ -74,6 +77,7 @@ def test_benchmark_excludes_baseline_and_recursively_uses_rtc_chunks():
     assert samples[0].rtc_total_ms == pytest.approx(100.0)
     assert samples[0].observed_delay_policy_steps == pytest.approx(3.0)
     assert samples[1].observed_delay_policy_steps == pytest.approx(6.0)
+    assert reported == samples
 
 
 def test_benchmark_requires_completed_fixed_shape_server_warmup():
@@ -119,3 +123,16 @@ def test_saves_standalone_rtc_latency_csv(tmp_path: Path):
     text = path.read_text(encoding="utf-8")
     assert "request_index,rtc_total_ms,observed_delay_policy_steps,server_infer_ms,policy_infer_ms" in text
     assert "3.0" in text
+
+
+def test_incremental_writer_flushes_each_completed_sample(tmp_path: Path):
+    path = tmp_path / "rtc_latency.csv"
+    writer = IncrementalRTCLatencyWriter(path)
+    try:
+        writer.write(_sample(3.0))
+        text_while_open = path.read_text(encoding="utf-8")
+    finally:
+        writer.close()
+
+    assert "request_index,rtc_total_ms,observed_delay_policy_steps" in text_while_open
+    assert "3.0" in text_while_open

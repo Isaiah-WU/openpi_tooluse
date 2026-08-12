@@ -8,7 +8,7 @@ import dataclasses
 import math
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -76,6 +76,7 @@ def run_rtc_latency_benchmark(
     inference_delay: int = 3,
     execution_horizon: int = 10,
     clock=time.perf_counter,
+    on_sample: Callable[[RTCLatencySample], None] | None = None,
 ) -> list[RTCLatencySample]:
     """Run one unmeasured baseline request followed by serial RTC requests.
 
@@ -124,15 +125,16 @@ def run_rtc_latency_benchmark(
             action_horizon=action_horizon,
             action_dim=action_dim,
         )
-        samples.append(
-            RTCLatencySample(
-                request_index=request_index,
-                rtc_total_ms=elapsed_seconds * 1000.0,
-                observed_delay_policy_steps=elapsed_seconds * policy_hz,
-                server_infer_ms=_optional_finite_float(result.get("server_timing", {}).get("infer_ms")),
-                policy_infer_ms=_optional_finite_float(result.get("policy_timing", {}).get("infer_ms")),
-            )
+        sample = RTCLatencySample(
+            request_index=request_index,
+            rtc_total_ms=elapsed_seconds * 1000.0,
+            observed_delay_policy_steps=elapsed_seconds * policy_hz,
+            server_infer_ms=_optional_finite_float(result.get("server_timing", {}).get("infer_ms")),
+            policy_infer_ms=_optional_finite_float(result.get("policy_timing", {}).get("infer_ms")),
         )
+        samples.append(sample)
+        if on_sample is not None:
+            on_sample(sample)
 
     return samples
 
@@ -190,3 +192,39 @@ def save_rtc_latency_samples(path: Path, samples: list[RTCLatencySample]) -> Non
         writer = csv.DictWriter(file, fieldnames=list(samples[0].as_row()))
         writer.writeheader()
         writer.writerows(sample.as_row() for sample in samples)
+
+
+class IncrementalRTCLatencyWriter:
+    """Append and flush each completed sample so interrupted runs retain evidence."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("w", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=list(
+                RTCLatencySample(
+                    request_index=0,
+                    rtc_total_ms=0.0,
+                    observed_delay_policy_steps=0.0,
+                    server_infer_ms=None,
+                    policy_infer_ms=None,
+                ).as_row()
+            ),
+        )
+        self._writer.writeheader()
+        self._file.flush()
+
+    def write(self, sample: RTCLatencySample) -> None:
+        self._writer.writerow(sample.as_row())
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> "IncrementalRTCLatencyWriter":
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+        self.close()
