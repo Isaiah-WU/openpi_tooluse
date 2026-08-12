@@ -51,6 +51,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         prefix_actions=None,
         prefix_attention_horizon=None,
         prev_chunk_left_over=None,
+        prev_chunk_valid_steps=None,
         inference_delay=None,
         execution_horizon=None,
     ) -> Dict:  # noqa: UP006
@@ -75,6 +76,8 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                     "execution_horizon": execution_horizon,
                 }
             )
+            if prev_chunk_valid_steps is not None:
+                infer_kwargs["prev_chunk_valid_steps"] = prev_chunk_valid_steps
 
         if not infer_kwargs:
             # Common path: send the observation as-is (byte-identical to the original

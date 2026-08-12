@@ -40,6 +40,39 @@ def test_exponential_prefix_weights_transform_linear_schedule():
     torch.testing.assert_close(exponential, expected)
 
 
+def test_tensor_runtime_scalars_match_integer_prefix_weights():
+    processor = _processor("exp")
+    integer_weights = processor.get_prefix_weights(2, 6, 10)
+    tensor_weights = processor.get_prefix_weights(
+        torch.tensor(2, dtype=torch.int64),
+        torch.tensor(6, dtype=torch.int64),
+        10,
+    )
+
+    torch.testing.assert_close(tensor_weights, integer_weights)
+
+
+def test_tensor_runtime_scalars_reuse_compiled_prefix_weight_graph():
+    processor = _processor("linear")
+    compile_count = 0
+
+    def counting_backend(graph_module, _example_inputs):
+        nonlocal compile_count
+        compile_count += 1
+        return graph_module.forward
+
+    def weights(delay, horizon):
+        return processor.get_prefix_weights(delay, horizon, 10)
+
+    compiled_weights = torch.compile(weights, backend=counting_backend, fullgraph=True)
+    first = compiled_weights(torch.tensor(2), torch.tensor(6))
+    second = compiled_weights(torch.tensor(3), torch.tensor(7))
+
+    torch.testing.assert_close(first, processor.get_prefix_weights(2, 6, 10))
+    torch.testing.assert_close(second, processor.get_prefix_weights(3, 7, 10))
+    assert compile_count == 1
+
+
 def test_no_prefix_is_exact_passthrough_without_enabling_grad():
     processor = _processor()
     x_t = torch.randn(1, 8, 3)
@@ -113,3 +146,51 @@ def test_rejects_leftover_longer_than_action_horizon():
 
     with pytest.raises(ValueError, match="cannot be longer"):
         processor.denoise_step(x_t, previous, 1, 0.5, lambda value: value)
+
+
+def test_fixed_prefix_padding_matches_variable_prefix_guidance():
+    processor = _processor("zeros", execution_horizon=4)
+    x_t = torch.zeros(1, 6, 1)
+    variable = torch.ones(1, 3, 1)
+    fixed = torch.full((1, 6, 1), 99.0)
+    fixed[:, :3] = variable
+
+    variable_velocity = processor.denoise_step(x_t, variable, 2, 0.5, lambda value: value * 0)
+    fixed_velocity = processor.denoise_step(
+        x_t,
+        fixed,
+        2,
+        0.5,
+        lambda value: value * 0,
+        previous_chunk_valid_steps=3,
+    )
+
+    torch.testing.assert_close(fixed_velocity, variable_velocity)
+
+
+def test_tensor_runtime_scalars_match_integer_guidance():
+    processor = _processor("linear", execution_horizon=4)
+    x_t = torch.zeros(1, 6, 1)
+    previous = torch.ones(1, 6, 1)
+    denoiser = lambda value: value * 0
+
+    integer_velocity = processor.denoise_step(
+        x_t,
+        previous,
+        2,
+        0.5,
+        denoiser,
+        execution_horizon=4,
+        previous_chunk_valid_steps=3,
+    )
+    tensor_velocity = processor.denoise_step(
+        x_t,
+        previous,
+        torch.tensor(2),
+        0.5,
+        denoiser,
+        execution_horizon=torch.tensor(4),
+        previous_chunk_valid_steps=torch.tensor(3),
+    )
+
+    torch.testing.assert_close(tensor_velocity, integer_velocity)

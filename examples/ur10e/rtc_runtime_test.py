@@ -76,6 +76,7 @@ def test_first_request_keeps_original_protocol() -> None:
         rtc_enabled=True,
         inference_delay_steps=6,
         execution_horizon=10,
+        action_horizon=50,
         action_dim=7,
     ) == {}
 
@@ -120,10 +121,14 @@ def test_rtc_request_uses_policy_rate_prefix() -> None:
         rtc_enabled=True,
         inference_delay_steps=6,
         execution_horizon=10,
+        action_horizon=50,
         action_dim=7,
     )
 
-    np.testing.assert_array_equal(kwargs["prev_chunk_left_over"], prefix)
+    assert kwargs["prev_chunk_left_over"].shape == (50, 7)
+    np.testing.assert_array_equal(kwargs["prev_chunk_left_over"][:8], prefix)
+    np.testing.assert_array_equal(kwargs["prev_chunk_left_over"][8:], 0.0)
+    assert kwargs["prev_chunk_valid_steps"] == 8
     assert kwargs["inference_delay"] == 6
     assert kwargs["execution_horizon"] == 10
 
@@ -135,6 +140,7 @@ def test_rtc_request_requires_horizon_at_least_delay() -> None:
             rtc_enabled=True,
             inference_delay_steps=12,
             execution_horizon=10,
+            action_horizon=50,
             action_dim=7,
         )
 
@@ -147,6 +153,7 @@ def test_rtc_request_rejects_invalid_delay(delay: object) -> None:
             rtc_enabled=True,
             inference_delay_steps=delay,  # type: ignore[arg-type]
             execution_horizon=10,
+            action_horizon=50,
             action_dim=7,
         )
 

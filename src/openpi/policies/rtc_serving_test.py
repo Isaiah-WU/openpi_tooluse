@@ -85,6 +85,7 @@ def test_policy_normalizes_and_pads_previous_chunk_before_sampling(monkeypatch):
     policy.infer(
         {"state": np.array([0.0, 0.0], dtype=np.float32)},
         prev_chunk_left_over=previous,
+        prev_chunk_valid_steps=2,
         inference_delay=1,
         execution_horizon=2,
     )
@@ -96,8 +97,9 @@ def test_policy_normalizes_and_pads_previous_chunk_before_sampling(monkeypatch):
         transformed,
         torch.tensor([[[2.0, 4.0, 0.0], [6.0, 8.0, 0.0]]]),
     )
-    assert model.sample_kwargs["inference_delay"] == 1
-    assert model.sample_kwargs["execution_horizon"] == 2
+    torch.testing.assert_close(model.sample_kwargs["inference_delay"], torch.tensor(1))
+    torch.testing.assert_close(model.sample_kwargs["execution_horizon"], torch.tensor(2))
+    torch.testing.assert_close(model.sample_kwargs["prev_chunk_valid_steps"], torch.tensor(2))
 
 
 def test_policy_default_request_does_not_add_rtc_kwargs(monkeypatch):
@@ -160,6 +162,7 @@ def test_websocket_client_sends_rtc_sampling_arguments():
     client.infer(
         observation,
         prev_chunk_left_over=previous,
+        prev_chunk_valid_steps=2,
         inference_delay=1,
         execution_horizon=2,
     )
@@ -167,5 +170,6 @@ def test_websocket_client_sends_rtc_sampling_arguments():
     sent = msgpack_numpy.unpackb(client._ws.sent)  # noqa: SLF001
     np.testing.assert_array_equal(sent["observation"]["state"], observation["state"])
     np.testing.assert_array_equal(sent["infer_kwargs"]["prev_chunk_left_over"], previous)
+    assert sent["infer_kwargs"]["prev_chunk_valid_steps"] == 2
     assert sent["infer_kwargs"]["inference_delay"] == 1
     assert sent["infer_kwargs"]["execution_horizon"] == 2

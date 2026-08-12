@@ -28,6 +28,7 @@ def add_rtc_server_capability(
         "rtc": {
             "supported": True,
             "enabled": bool(rtc_enabled),
+            "fixed_prefix_shape": True,
             "execution_horizon": int(execution_horizon),
             "prefix_attention_schedule": str(prefix_attention_schedule),
             "max_guidance_weight": float(max_guidance_weight),
@@ -40,6 +41,7 @@ def validate_rtc_server_capability(
     metadata: Mapping[str, Any] | None,
     *,
     rtc_requested: bool,
+    fixed_prefix_shape_required: bool = False,
 ) -> None:
     """Allow baseline legacy servers but fail fast for an incompatible RTC server."""
     if not rtc_requested:
@@ -55,10 +57,12 @@ def validate_rtc_server_capability(
     rtc = dict(raw_rtc)
     if protocol_version != RTC_PROTOCOL_VERSION:
         raise RuntimeError(
-            "RTC client requires server rtc_protocol_version=1; "
+            f"RTC client requires server rtc_protocol_version={RTC_PROTOCOL_VERSION}; "
             f"received {protocol_version!r}"
         )
     if not rtc.get("supported", False):
         raise RuntimeError("Policy server does not advertise RTC support")
     if not rtc.get("enabled", False):
         raise RuntimeError("Policy server RTC processor is not enabled")
+    if fixed_prefix_shape_required and not rtc.get("fixed_prefix_shape", False):
+        raise RuntimeError("RTC client requires server fixed-prefix-shape support")

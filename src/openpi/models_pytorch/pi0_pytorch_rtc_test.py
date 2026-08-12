@@ -27,6 +27,7 @@ def test_sample_actions_exposes_lerobot_compatible_rtc_arguments():
     parameters = inspect.signature(PI0Pytorch.sample_actions).parameters
 
     assert "prev_chunk_left_over" in parameters
+    assert "prev_chunk_valid_steps" in parameters
     assert "inference_delay" in parameters
     assert "execution_horizon" in parameters
 
@@ -172,6 +173,30 @@ def test_sample_actions_routes_previous_chunk_through_rtc():
         noise=noise,
         num_steps=2,
         prev_chunk_left_over=previous,
+        inference_delay=1,
+        execution_horizon=2,
+    )
+
+    torch.testing.assert_close(actions, torch.tensor([[[1.0], [0.0]]]))
+
+
+def test_sample_actions_ignores_fixed_prefix_padding():
+    def denoise_step(_state, _prefix_masks, _cache, x_t, _timestep):
+        return x_t * 0
+
+    model = _fake_model(_processor(), denoise_step)
+    observation = SimpleNamespace(state=torch.zeros(1, 1))
+    noise = torch.zeros(1, 2, 1)
+    previous = torch.tensor([[[1.0], [99.0]]])
+
+    actions = PI0Pytorch.sample_actions(
+        model,
+        "cpu",
+        observation,
+        noise=noise,
+        num_steps=2,
+        prev_chunk_left_over=previous,
+        prev_chunk_valid_steps=1,
         inference_delay=1,
         execution_horizon=2,
     )

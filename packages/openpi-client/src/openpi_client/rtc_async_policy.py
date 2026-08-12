@@ -21,9 +21,10 @@ def _build_rtc_infer_kwargs(
     rtc_enabled: bool,
     inference_delay_steps: int | None,
     execution_horizon: int | None,
+    action_horizon: int,
     action_dim: int,
 ) -> dict[str, Any]:
-    """Build one RTC request, leaving first/no-prefix requests unchanged."""
+    """Build one fixed-shape RTC request, leaving first/no-prefix requests unchanged."""
     if prev_chunk_left_over is None:
         return {}
     if not rtc_enabled:
@@ -51,9 +52,18 @@ def _build_rtc_infer_kwargs(
         )
     if len(prefix) == 0:
         return {}
+    if len(prefix) > action_horizon:
+        raise ValueError(
+            f"prev_chunk_left_over cannot exceed action_horizon={action_horizon}, got {len(prefix)} steps"
+        )
+
+    valid_steps = len(prefix)
+    fixed_prefix = np.zeros((action_horizon, action_dim), dtype=np.float32)
+    fixed_prefix[:valid_steps] = prefix
 
     return {
-        "prev_chunk_left_over": np.ascontiguousarray(prefix),
+        "prev_chunk_left_over": np.ascontiguousarray(fixed_prefix),
+        "prev_chunk_valid_steps": valid_steps,
         "inference_delay": inference_delay_steps,
         "execution_horizon": execution_horizon,
     }
@@ -143,6 +153,7 @@ def _policy_worker(
         validate_rtc_server_capability(
             server_metadata,
             rtc_requested=rtc_enabled,
+            fixed_prefix_shape_required=rtc_enabled,
         )
         startup_queue.put(
             {
@@ -289,6 +300,7 @@ class AsyncPolicyProcess:
         self._rtc_enabled = rtc_enabled
         self._rtc_inference_delay_steps = rtc_inference_delay_steps
         self._rtc_execution_horizon = rtc_execution_horizon
+        self._action_horizon = action_horizon
         self._action_dim = action_dim
 
         self._ctx = mp.get_context("spawn")
@@ -445,6 +457,7 @@ class AsyncPolicyProcess:
             rtc_enabled=self._rtc_enabled,
             inference_delay_steps=self._rtc_inference_delay_steps,
             execution_horizon=self._rtc_execution_horizon,
+            action_horizon=self._action_horizon,
             action_dim=self._action_dim,
         )
 
@@ -456,7 +469,7 @@ class AsyncPolicyProcess:
             observation_ready=observation_ready,
             request_submit=request_submit,
             rtc_prefix_steps=(
-                len(infer_kwargs["prev_chunk_left_over"]) if infer_kwargs else 0
+                infer_kwargs["prev_chunk_valid_steps"] if infer_kwargs else 0
             ),
             rtc_inference_delay_steps=(
                 infer_kwargs.get("inference_delay") if infer_kwargs else None

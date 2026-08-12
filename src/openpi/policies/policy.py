@@ -21,6 +21,24 @@ from openpi.shared import nnx_utils
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
 
+def _rtc_step_tensor(
+    value: int,
+    *,
+    name: str,
+    device: str,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> torch.Tensor:
+    """Validate one RTC runtime scalar before it crosses the compile boundary."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}, got {value}")
+    return torch.tensor(value, dtype=torch.int64, device=device)
+
+
 def _make_rtc_blend_weight(action_horizon: int, num_committed: int, prefix_attention_horizon: int) -> np.ndarray:
     """Builds the per-step blend weight used for RTC-style soft-masked inpainting.
 
@@ -99,6 +117,7 @@ class Policy(BasePolicy):
         prefix_actions: np.ndarray | None = None,
         prefix_attention_horizon: int | None = None,
         prev_chunk_left_over: np.ndarray | None = None,
+        prev_chunk_valid_steps: int | None = None,
         inference_delay: int | None = None,
         execution_horizon: int | None = None,
     ) -> dict:  # type: ignore[misc]
@@ -178,12 +197,41 @@ class Policy(BasePolicy):
                     f"got {prev_chunk_left_over.shape}"
                 )
 
+            prefix_length = prev_chunk_left_over.shape[1]
+            inference_delay_tensor = _rtc_step_tensor(
+                inference_delay,
+                name="inference_delay",
+                device=self._pytorch_device,
+                minimum=0,
+            )
+            if prev_chunk_valid_steps is not None:
+                valid_steps_tensor = _rtc_step_tensor(
+                    prev_chunk_valid_steps,
+                    name="prev_chunk_valid_steps",
+                    device=self._pytorch_device,
+                    minimum=0,
+                    maximum=prefix_length,
+                )
+            else:
+                valid_steps_tensor = None
+            if execution_horizon is not None:
+                execution_horizon_tensor = _rtc_step_tensor(
+                    execution_horizon,
+                    name="execution_horizon",
+                    device=self._pytorch_device,
+                    minimum=1,
+                )
+            else:
+                execution_horizon_tensor = None
+
             sample_kwargs["prev_chunk_left_over"] = torch.from_numpy(
                 np.ascontiguousarray(prev_chunk_left_over)
             ).to(self._pytorch_device)
-            sample_kwargs["inference_delay"] = inference_delay
-            if execution_horizon is not None:
-                sample_kwargs["execution_horizon"] = execution_horizon
+            if valid_steps_tensor is not None:
+                sample_kwargs["prev_chunk_valid_steps"] = valid_steps_tensor
+            sample_kwargs["inference_delay"] = inference_delay_tensor
+            if execution_horizon_tensor is not None:
+                sample_kwargs["execution_horizon"] = execution_horizon_tensor
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()

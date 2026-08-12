@@ -20,6 +20,7 @@ from torch import Tensor
 
 
 PrefixAttentionSchedule: TypeAlias = Literal["exp", "linear", "ones", "zeros"]
+StepScalar: TypeAlias = int | Tensor
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,8 +55,8 @@ class RTCProcessor:
 
     def get_prefix_weights(
         self,
-        inference_delay: int,
-        execution_horizon: int,
+        inference_delay: StepScalar,
+        execution_horizon: StepScalar,
         action_horizon: int,
         *,
         device: torch.device | str | None = None,
@@ -67,15 +68,27 @@ class RTCProcessor:
         ``execution_horizon`` transition from the old chunk to free replanning,
         and all later actions receive no prefix guidance.
         """
-        if inference_delay < 0:
-            raise ValueError(f"inference_delay must be non-negative, got {inference_delay}")
-        if not 0 <= execution_horizon <= action_horizon:
-            raise ValueError(
-                "expected 0 <= execution_horizon <= action_horizon, "
-                f"got execution_horizon={execution_horizon}, action_horizon={action_horizon}"
-            )
+        inference_delay = self._as_step_tensor(
+            inference_delay,
+            name="inference_delay",
+            device=device,
+            minimum=0,
+        )
+        execution_horizon = self._as_step_tensor(
+            execution_horizon,
+            name="execution_horizon",
+            device=device,
+            minimum=0,
+            maximum=action_horizon,
+        )
+        torch._assert(inference_delay >= 0, "inference_delay must be non-negative")
+        torch._assert(execution_horizon >= 0, "execution_horizon must be non-negative")
+        torch._assert(
+            execution_horizon <= action_horizon,
+            "execution_horizon cannot exceed action_horizon",
+        )
 
-        start = min(inference_delay, execution_horizon)
+        start = torch.minimum(inference_delay, execution_horizon)
         indices = torch.arange(action_horizon, device=device, dtype=dtype)
 
         if self.config.prefix_attention_schedule == "ones":
@@ -83,8 +96,8 @@ class RTCProcessor:
         elif self.config.prefix_attention_schedule == "zeros":
             weights = (indices < start).to(dtype=dtype)
         else:
-            denominator = execution_horizon - start + 1
-            weights = ((start - 1 - indices) / denominator + 1).clamp(0, 1)
+            denominator = (execution_horizon - start + 1).to(dtype=dtype)
+            weights = ((start.to(dtype=dtype) - 1 - indices) / denominator + 1).clamp(0, 1)
             if self.config.prefix_attention_schedule == "exp":
                 weights = weights * torch.expm1(weights) / (math.e - 1)
 
@@ -94,11 +107,12 @@ class RTCProcessor:
         self,
         x_t: Tensor,
         previous_chunk_leftover: Tensor | None,
-        inference_delay: int,
+        inference_delay: StepScalar,
         time: float | Tensor,
         denoiser: Callable[[Tensor], Tensor],
         *,
-        execution_horizon: int | None = None,
+        execution_horizon: StepScalar | None = None,
+        previous_chunk_valid_steps: StepScalar | None = None,
     ) -> Tensor:
         """Return the base or RTC-guided reverse-time velocity.
 
@@ -109,21 +123,37 @@ class RTCProcessor:
         if not self.config.enabled or previous_chunk_leftover is None:
             return denoiser(x_t)
 
-        self._validate_inputs(x_t, previous_chunk_leftover, inference_delay)
+        self._validate_inputs(x_t, previous_chunk_leftover)
         if previous_chunk_leftover.shape[1] == 0:
             return denoiser(x_t)
         local_time = torch.as_tensor(time, device=x_t.device, dtype=x_t.dtype)
         if local_time.numel() != 1:
             raise ValueError(f"time must be scalar, got shape {tuple(local_time.shape)}")
-        if not 0.0 <= local_time.item() <= 1.0:
-            raise ValueError(f"time must be in [0, 1], got {local_time.item()}")
+        torch._assert((local_time >= 0.0) & (local_time <= 1.0), "time must be in [0, 1]")
 
         action_horizon = x_t.shape[1]
         prefix_length = previous_chunk_leftover.shape[1]
+        valid_steps = self._as_step_tensor(
+            prefix_length if previous_chunk_valid_steps is None else previous_chunk_valid_steps,
+            name="previous_chunk_valid_steps",
+            device=x_t.device,
+            minimum=0,
+            maximum=prefix_length,
+        )
+        torch._assert(valid_steps >= 0, "previous_chunk_valid_steps must be non-negative")
+        torch._assert(
+            valid_steps <= prefix_length,
+            "previous_chunk_valid_steps cannot exceed the prefix tensor length",
+        )
         requested_horizon = self.config.execution_horizon if execution_horizon is None else execution_horizon
-        if requested_horizon <= 0:
-            raise ValueError(f"execution_horizon must be positive, got {requested_horizon}")
-        effective_horizon = min(requested_horizon, prefix_length, action_horizon)
+        requested_horizon = self._as_step_tensor(
+            requested_horizon,
+            name="execution_horizon",
+            device=x_t.device,
+            minimum=1,
+        )
+        torch._assert(requested_horizon > 0, "execution_horizon must be positive")
+        effective_horizon = torch.minimum(requested_horizon, valid_steps).clamp(max=action_horizon)
 
         previous_chunk = torch.zeros_like(x_t)
         previous_chunk[:, :prefix_length] = previous_chunk_leftover.to(device=x_t.device, dtype=x_t.dtype)
@@ -180,7 +210,36 @@ class RTCProcessor:
         ).clamp(min=0.0, max=self.config.max_guidance_weight)
 
     @staticmethod
-    def _validate_inputs(x_t: Tensor, previous_chunk_leftover: Tensor, inference_delay: int) -> None:
+    def _as_step_tensor(
+        value: StepScalar,
+        *,
+        name: str,
+        device: torch.device | str | None,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> Tensor:
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer scalar")
+        if isinstance(value, int):
+            if minimum is not None and value < minimum:
+                raise ValueError(f"{name} must be at least {minimum}, got {value}")
+            if maximum is not None and value > maximum:
+                raise ValueError(f"{name} must be at most {maximum}, got {value}")
+            return torch.tensor(value, dtype=torch.int64, device=device)
+        if not isinstance(value, Tensor) or value.numel() != 1 or value.dtype == torch.bool:
+            raise ValueError(f"{name} must be an integer scalar tensor")
+        if value.dtype not in {
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.uint8,
+        }:
+            raise ValueError(f"{name} must use an integer dtype, got {value.dtype}")
+        return value.reshape(()).to(device=device, dtype=torch.int64)
+
+    @staticmethod
+    def _validate_inputs(x_t: Tensor, previous_chunk_leftover: Tensor) -> None:
         if x_t.ndim != 3:
             raise ValueError(f"x_t must have shape (batch, horizon, action_dim), got {tuple(x_t.shape)}")
         if not x_t.is_floating_point():
@@ -196,5 +255,3 @@ class RTCProcessor:
             raise ValueError("previous_chunk_leftover and x_t must have the same action dimension")
         if previous_chunk_leftover.shape[1] > x_t.shape[1]:
             raise ValueError("previous_chunk_leftover cannot be longer than the action horizon")
-        if inference_delay < 0:
-            raise ValueError(f"inference_delay must be non-negative, got {inference_delay}")

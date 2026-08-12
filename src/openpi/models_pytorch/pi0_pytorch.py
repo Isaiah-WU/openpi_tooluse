@@ -16,8 +16,8 @@ from openpi.models_pytorch.rtc_processor import RTCProcessor
 def _prepare_rtc_sampling(
     rtc_processor: RTCProcessor | None,
     prev_chunk_left_over: Tensor | None,
-    inference_delay: int | None,
-) -> tuple[RTCProcessor | None, int]:
+    inference_delay: int | Tensor | None,
+) -> tuple[RTCProcessor | None, int | Tensor]:
     """Validate RTC inputs and return the processor active for this chunk.
 
     The first chunk has no previous actions and must use the original sampler,
@@ -30,8 +30,13 @@ def _prepare_rtc_sampling(
         raise ValueError("prev_chunk_left_over requires an enabled RTCProcessor")
     if inference_delay is None:
         raise ValueError("prev_chunk_left_over requires inference_delay")
-    if isinstance(inference_delay, bool) or not isinstance(inference_delay, int) or inference_delay < 0:
+    if isinstance(inference_delay, bool):
         raise ValueError(f"inference_delay must be a non-negative integer, got {inference_delay}")
+    if isinstance(inference_delay, int):
+        if inference_delay < 0:
+            raise ValueError(f"inference_delay must be a non-negative integer, got {inference_delay}")
+    elif not isinstance(inference_delay, Tensor) or inference_delay.numel() != 1:
+        raise ValueError(f"inference_delay must be a non-negative integer scalar, got {inference_delay}")
 
     return rtc_processor, inference_delay
 
@@ -42,9 +47,10 @@ def _denoise_with_optional_rtc(
     x_t: Tensor,
     *,
     prev_chunk_left_over: Tensor | None,
-    inference_delay: int,
+    inference_delay: int | Tensor,
     time: Tensor,
-    execution_horizon: int | None,
+    execution_horizon: int | Tensor | None,
+    prev_chunk_valid_steps: int | Tensor | None = None,
 ) -> Tensor:
     """Compute one base or RTC-guided reverse-time velocity."""
     if rtc_processor is None:
@@ -53,6 +59,7 @@ def _denoise_with_optional_rtc(
     return rtc_processor.denoise_step(
         x_t=x_t,
         previous_chunk_leftover=prev_chunk_left_over,
+        previous_chunk_valid_steps=prev_chunk_valid_steps,
         inference_delay=inference_delay,
         time=time,
         denoiser=denoiser,
@@ -596,8 +603,9 @@ class PI0Pytorch(nn.Module):
         num_steps=10,
         *,
         prev_chunk_left_over: Tensor | None = None,
-        inference_delay: int | None = None,
-        execution_horizon: int | None = None,
+        prev_chunk_valid_steps: int | Tensor | None = None,
+        inference_delay: int | Tensor | None = None,
+        execution_horizon: int | Tensor | None = None,
     ) -> Tensor:
         """Sample actions, optionally guided by the previous chunk using RTC."""
         active_rtc_processor, rtc_inference_delay = _prepare_rtc_sampling(
@@ -659,6 +667,7 @@ class PI0Pytorch(nn.Module):
                     denoiser,
                     x_t,
                     prev_chunk_left_over=prev_chunk_left_over,
+                    prev_chunk_valid_steps=prev_chunk_valid_steps,
                     inference_delay=rtc_inference_delay,
                     time=time,
                     execution_horizon=execution_horizon,
