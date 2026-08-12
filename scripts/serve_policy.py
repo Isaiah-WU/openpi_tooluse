@@ -123,6 +123,7 @@ def warm_up_policy_for_serving(
     rtc_config: RTCInferenceConfig,
     *,
     raw_observation: dict | None = None,
+    inference_executor: websocket_policy_server.PolicyInferenceExecutor | None = None,
 ) -> list[float] | None:
     """Warm compiled RTC paths before the listening socket can be created."""
     if not rtc_config.enabled:
@@ -133,14 +134,18 @@ def warm_up_policy_for_serving(
         "Warming up baseline and %d RTC inference paths before opening the server port",
         rtc_config.warmup_inferences,
     )
-    timings = policy.warm_up_rtc(
-        raw_observation=raw_observation,
-        execution_horizon=ur10e_policy.RTC_WARMUP_EXECUTION_HORIZON,
-        warmup_inferences=rtc_config.warmup_inferences,
-        prev_chunk_valid_steps=ur10e_policy.RTC_WARMUP_INITIAL_VALID_STEPS,
-        inference_delay=ur10e_policy.RTC_WARMUP_INFERENCE_DELAY,
-        expected_action_dim=ur10e_policy.RTC_WARMUP_ACTION_DIM,
-    )
+    warmup_kwargs = {
+        "raw_observation": raw_observation,
+        "execution_horizon": ur10e_policy.RTC_WARMUP_EXECUTION_HORIZON,
+        "warmup_inferences": rtc_config.warmup_inferences,
+        "prev_chunk_valid_steps": ur10e_policy.RTC_WARMUP_INITIAL_VALID_STEPS,
+        "inference_delay": ur10e_policy.RTC_WARMUP_INFERENCE_DELAY,
+        "expected_action_dim": ur10e_policy.RTC_WARMUP_ACTION_DIM,
+    }
+    if inference_executor is None:
+        timings = policy.warm_up_rtc(**warmup_kwargs)
+    else:
+        timings = inference_executor.run(policy.warm_up_rtc, **warmup_kwargs)
     logging.info(
         "RTC warm-up complete (baseline=%.3fs, rtc=%s)",
         timings[0],
@@ -151,16 +156,27 @@ def warm_up_policy_for_serving(
 
 def main(args: Args) -> None:
     policy = create_policy(args)
+    inference_executor = (
+        websocket_policy_server.PolicyInferenceExecutor()
+        if args.rtc.enabled
+        else None
+    )
     warmup_observation = None
     if args.rtc.enabled and isinstance(args.policy, Checkpoint):
         train_config = _config.get_config(args.policy.config)
         if isinstance(train_config.data, _config.LeRobotUR10eDataConfig):
             warmup_observation = ur10e_policy.make_ur10e_rtc_warmup_observation()
-    warmup_timings = warm_up_policy_for_serving(
-        policy,
-        args.rtc,
-        raw_observation=warmup_observation,
-    )
+    try:
+        warmup_timings = warm_up_policy_for_serving(
+            policy,
+            args.rtc,
+            raw_observation=warmup_observation,
+            inference_executor=inference_executor,
+        )
+    except BaseException:
+        if inference_executor is not None:
+            inference_executor.close()
+        raise
     warmup_complete = True if warmup_timings is not None else None
 
     policy_metadata = add_rtc_server_capability(
@@ -181,13 +197,18 @@ def main(args: Args) -> None:
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
-    server = websocket_policy_server.WebsocketPolicyServer(
-        policy=policy,
-        host="0.0.0.0",
-        port=args.port,
-        metadata=policy_metadata,
-    )
-    server.serve_forever()
+    try:
+        server = websocket_policy_server.WebsocketPolicyServer(
+            policy=policy,
+            host="0.0.0.0",
+            port=args.port,
+            metadata=policy_metadata,
+            inference_executor=inference_executor,
+        )
+        server.serve_forever()
+    finally:
+        if inference_executor is not None:
+            inference_executor.close()
 
 
 if __name__ == "__main__":

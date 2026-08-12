@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -12,12 +13,18 @@ class _FakePolicy:
     def __init__(self, *, failure: Exception | None = None):
         self.failure = failure
         self.warmup_calls = []
+        self.warmup_thread_ids = []
+        self.infer_thread_ids = []
 
     def warm_up_rtc(self, **kwargs):
         self.warmup_calls.append(kwargs)
+        self.warmup_thread_ids.append(threading.get_ident())
         if self.failure is not None:
             raise self.failure
         return [1.0, 2.0, 3.0]
+
+    def infer(self):
+        self.infer_thread_ids.append(threading.get_ident())
 
 
 def test_disabled_rtc_does_not_warm_up_policy():
@@ -129,6 +136,7 @@ def test_disabled_rtc_constructs_server_without_warmup_or_config_lookup(monkeypa
 
 def test_server_is_constructed_only_after_successful_warmup(monkeypatch):
     events = []
+    main_thread_id = threading.get_ident()
     policy = _FakePolicy()
     args = serve_policy.Args(
         rtc=RTCInferenceConfig(enabled=True),
@@ -148,12 +156,13 @@ def test_server_is_constructed_only_after_successful_warmup(monkeypatch):
     class _Server:
         def __init__(self, **kwargs):
             events.append("server")
+            self.inference_executor = kwargs["inference_executor"]
             rtc_metadata = kwargs["metadata"]["openpi_server"]["rtc"]
             assert rtc_metadata["warmup_complete"] is True
             assert rtc_metadata["warmup_inferences"] == 2
 
         def serve_forever(self):
-            return None
+            self.inference_executor.run(policy.infer)
 
     monkeypatch.setattr(serve_policy, "warm_up_policy_for_serving", tracked_warmup)
     monkeypatch.setattr(serve_policy.websocket_policy_server, "WebsocketPolicyServer", _Server)
@@ -161,3 +170,5 @@ def test_server_is_constructed_only_after_successful_warmup(monkeypatch):
     serve_policy.main(args)
 
     assert events == ["warmup", "server"]
+    assert policy.warmup_thread_ids == policy.infer_thread_ids
+    assert policy.warmup_thread_ids[0] != main_thread_id

@@ -1,4 +1,6 @@
 import asyncio
+import concurrent.futures
+import functools
 import http
 import logging
 import time
@@ -10,6 +12,31 @@ import websockets.asyncio.server as _server
 import websockets.frames
 
 logger = logging.getLogger(__name__)
+
+
+class PolicyInferenceExecutor:
+    """Serialize policy work on one persistent thread for CUDA Graph affinity."""
+
+    def __init__(self) -> None:
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="openpi-policy-inference",
+        )
+
+    def run(self, function, /, *args, **kwargs):
+        """Run blocking policy work on the persistent inference thread."""
+        return self._executor.submit(function, *args, **kwargs).result()
+
+    async def run_async(self, function, /, *args, **kwargs):
+        """Await policy work on the same persistent inference thread."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            functools.partial(function, *args, **kwargs),
+        )
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
 
 class WebsocketPolicyServer:
@@ -24,11 +51,13 @@ class WebsocketPolicyServer:
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        inference_executor: PolicyInferenceExecutor | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        self._inference_executor = inference_executor
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -71,7 +100,10 @@ class WebsocketPolicyServer:
                 # otherwise this single call would stall every other connection (and any
                 # pipelined prefetch request from this same client) for the duration of
                 # the GPU/model forward pass.
-                action = await asyncio.to_thread(self._policy.infer, obs, **infer_kwargs)
+                if self._inference_executor is None:
+                    action = await asyncio.to_thread(self._policy.infer, obs, **infer_kwargs)
+                else:
+                    action = await self._inference_executor.run_async(self._policy.infer, obs, **infer_kwargs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {
