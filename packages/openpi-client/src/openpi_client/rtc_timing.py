@@ -126,6 +126,9 @@ class ControlCycleTiming:
     arm_action_delta_l2: float | None = None
     max_abs_arm_action_delta: float | None = None
     gripper_action_delta_abs: float | None = None
+    arm_target_error_l2: float | None = None
+    max_abs_arm_target_error: float | None = None
+    gripper_target_error_abs: float | None = None
 
     execute_action_start: float | None = None
     execute_action_end: float | None = None
@@ -155,6 +158,21 @@ class ControlCycleTiming:
             "gripper_action_delta_abs": (
                 self.gripper_action_delta_abs
                 if self.gripper_action_delta_abs is not None
+                else float("nan")
+            ),
+            "arm_target_error_l2": (
+                self.arm_target_error_l2
+                if self.arm_target_error_l2 is not None
+                else float("nan")
+            ),
+            "max_abs_arm_target_error": (
+                self.max_abs_arm_target_error
+                if self.max_abs_arm_target_error is not None
+                else float("nan")
+            ),
+            "gripper_target_error_abs": (
+                self.gripper_target_error_abs
+                if self.gripper_target_error_abs is not None
                 else float("nan")
             ),
             "execute_action_ms": _duration_ms(

@@ -31,6 +31,9 @@ CYCLE_METRIC_NAMES = (
     "arm_action_delta_l2",
     "max_abs_arm_action_delta",
     "gripper_action_delta_abs",
+    "arm_target_error_l2",
+    "max_abs_arm_target_error",
+    "gripper_target_error_abs",
     "execute_action_ms",
     "control_cycle_ms",
 )
