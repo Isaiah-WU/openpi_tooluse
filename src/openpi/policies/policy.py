@@ -102,7 +102,90 @@ class Policy(BasePolicy):
     ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+
+        # RTC prefixes cross the websocket boundary in the policy's external action
+        # space (for UR10e: absolute, unnormalized 7-D actions).  Feed them through
+        # the exact same input action transforms used during training before passing
+        # them to the model (for Pi0.5 UR10e: normalized and padded to 32-D).
+        # Sending the external prefix directly to sample_actions would both use the
+        # wrong units and fail when the external and model action dimensions differ.
+        model_prefix_actions: np.ndarray | None = None
+        prefix_length: int | None = None
+        num_committed: int | None = None
+        if prefix_actions is not None:
+            if self._is_pytorch_model:
+                raise NotImplementedError("RTC prefix actions are not implemented for PyTorch policies")
+            if prefix_attention_horizon is None:
+                raise ValueError("prefix_attention_horizon is required when prefix_actions is provided.")
+
+            external_prefix_actions = np.asarray(prefix_actions)
+            if external_prefix_actions.ndim == 2:
+                prefix_length = external_prefix_actions.shape[0]
+            elif external_prefix_actions.ndim == 3:
+                if external_prefix_actions.shape[0] != 1:
+                    raise ValueError(
+                        "batched prefix_actions must have a singleton batch dimension, "
+                        f"got {external_prefix_actions.shape}"
+                    )
+                external_prefix_actions = external_prefix_actions[0]
+                prefix_length = external_prefix_actions.shape[0]
+            else:
+                raise ValueError(
+                    "prefix_actions must have shape (c, action_dim) or "
+                    f"(1, c, action_dim), got {external_prefix_actions.shape}"
+                )
+            if prefix_length == 0:
+                raise ValueError("prefix_actions must contain at least one action")
+            if prefix_length > self._model.action_horizon:
+                raise ValueError(
+                    f"prefix_actions has {prefix_length} steps but model action_horizon is {self._model.action_horizon}"
+                )
+            if not np.isfinite(external_prefix_actions).all():
+                raise ValueError("prefix_actions contains NaN or infinity")
+
+            num_committed = prefix_length if num_committed_actions is None else num_committed_actions
+            if not 0 <= num_committed <= prefix_length:
+                raise ValueError(
+                    f"num_committed_actions ({num_committed}) must be in [0, prefix length={prefix_length}]"
+                )
+            if not 0 <= prefix_attention_horizon <= prefix_length:
+                raise ValueError(
+                    f"prefix_attention_horizon ({prefix_attention_horizon}) must be in "
+                    f"[0, prefix length={prefix_length}]"
+                )
+
+            # Copy so in-place action transforms such as DeltaActions cannot mutate
+            # a client-owned array or the broker's cached trajectory.
+            inputs["actions"] = np.array(external_prefix_actions, copy=True)
+
         inputs = self._input_transform(inputs)
+        if prefix_actions is not None:
+            if "actions" not in inputs:
+                raise ValueError(
+                    "RTC prefix_actions were removed by the policy input transforms; "
+                    "the policy cannot apply RTC guidance safely"
+                )
+            model_prefix_actions = np.asarray(inputs.pop("actions"))
+            if model_prefix_actions.ndim != 2:
+                raise ValueError(
+                    "transformed RTC prefix_actions must have shape (c, model_action_dim), "
+                    f"got {model_prefix_actions.shape}"
+                )
+            assert prefix_length is not None
+            if model_prefix_actions.shape[0] != prefix_length:
+                raise ValueError(
+                    "policy input transforms changed the RTC prefix time dimension from "
+                    f"{prefix_length} to {model_prefix_actions.shape[0]}; this transform "
+                    "requires an explicit RTC horizon mapping"
+                )
+            if model_prefix_actions.shape[1] != self._model.action_dim:
+                raise ValueError(
+                    "transformed RTC prefix action dimension does not match the model: "
+                    f"got {model_prefix_actions.shape[1]}, expected {self._model.action_dim}"
+                )
+            if not np.isfinite(model_prefix_actions).all():
+                raise ValueError("transformed RTC prefix_actions contains NaN or infinity")
+
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
@@ -121,40 +204,13 @@ class Policy(BasePolicy):
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
-        if prefix_actions is not None:
-            if prefix_attention_horizon is None:
-                raise ValueError("prefix_attention_horizon is required when prefix_actions is provided.")
-            prefix_actions = np.asarray(prefix_actions)
-            if prefix_actions.ndim == 2:
-                prefix_length = prefix_actions.shape[0]
-            elif prefix_actions.ndim == 3:
-                prefix_length = prefix_actions.shape[1]
-            else:
-                raise ValueError(
-                    f"prefix_actions must have shape (c, action_dim) or (1, c, action_dim), got {prefix_actions.shape}"
-                )
-            num_committed = prefix_length if num_committed_actions is None else num_committed_actions
-            if not 0 <= num_committed <= prefix_length:
-                raise ValueError(
-                    f"num_committed_actions ({num_committed}) must be in [0, prefix length={prefix_length}]"
-                )
-            if prefix_attention_horizon > prefix_length:
-                raise ValueError(
-                    f"prefix_attention_horizon ({prefix_attention_horizon}) cannot exceed "
-                    f"prefix length ({prefix_length})"
-                )
-            blend_weight = _make_rtc_blend_weight(
-                self._model.action_horizon, num_committed, prefix_attention_horizon
-            )
-            if self._is_pytorch_model:
-                # NOTE: pi0_pytorch does not yet implement the RTC blend args; passing them
-                # to a PyTorch model will raise inside sample_actions until ported.
-                prefix_actions = torch.from_numpy(prefix_actions).to(self._pytorch_device)[None, ...]
-                blend_weight = torch.from_numpy(blend_weight).to(self._pytorch_device)
-            else:
-                prefix_actions = jnp.asarray(prefix_actions)[None, ...]
-                blend_weight = jnp.asarray(blend_weight)
-            sample_kwargs["prefix_actions"] = prefix_actions
+        if model_prefix_actions is not None:
+            assert prefix_attention_horizon is not None
+            assert num_committed is not None
+            blend_weight = _make_rtc_blend_weight(self._model.action_horizon, num_committed, prefix_attention_horizon)
+            model_prefix_actions = jnp.asarray(model_prefix_actions)[None, ...]
+            blend_weight = jnp.asarray(blend_weight)
+            sample_kwargs["prefix_actions"] = model_prefix_actions
             sample_kwargs["blend_weight"] = blend_weight
 
         observation = _model.Observation.from_dict(inputs)
