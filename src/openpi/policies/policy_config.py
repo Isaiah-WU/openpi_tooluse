@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 import pathlib
@@ -26,6 +27,20 @@ def _create_rtc_processor(
     if not is_pytorch:
         raise ValueError("Inference-time RTC is currently supported only for PyTorch checkpoints")
     return RTCProcessor(rtc_config)
+
+
+def _pytorch_config_for_inference(
+    train_config: _config.TrainConfig,
+    rtc_processor: RTCProcessor | None,
+) -> _config.TrainConfig:
+    """Match LeRobot's default RTC runtime by compiling only non-RTC policies."""
+    if rtc_processor is None or train_config.model.pytorch_compile_mode is None:
+        return train_config
+    logging.info("Disabling torch.compile for RTC inference to match the LeRobot RTC runtime")
+    return dataclasses.replace(
+        train_config,
+        model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
+    )
 
 
 def create_trained_policy(
@@ -73,8 +88,11 @@ def create_trained_policy(
 
     logging.info("Loading model...")
     if is_pytorch:
-        model = train_config.model.load_pytorch(
-            train_config,
+        # Keep the checkpoint's training config immutable. Only the model copy
+        # constructed for an enabled RTC server changes its compile setting.
+        pytorch_train_config = _pytorch_config_for_inference(train_config, rtc_processor)
+        model = pytorch_train_config.model.load_pytorch(
+            pytorch_train_config,
             weight_path,
             rtc_processor=rtc_processor,
         )

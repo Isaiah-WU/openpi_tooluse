@@ -1,3 +1,4 @@
+import dataclasses
 import inspect
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ import pytest
 import torch
 
 from openpi.models import model as _model
+from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.rtc_processor import RTCInferenceConfig
 from openpi.models_pytorch.rtc_processor import RTCProcessor
 from openpi.policies import policy as _policy
@@ -34,6 +36,31 @@ def test_enabled_rtc_creates_processor_only_for_pytorch():
 
     with pytest.raises(ValueError, match="PyTorch checkpoints"):
         _policy_config._create_rtc_processor(config, is_pytorch=False)  # noqa: SLF001
+
+
+@dataclasses.dataclass(frozen=True)
+class _FakeTrainConfig:
+    model: Pi0Config
+
+
+def test_rtc_inference_matches_lerobot_default_without_torch_compile():
+    original = _FakeTrainConfig(model=Pi0Config(pytorch_compile_mode="max-autotune"))
+
+    processor = RTCProcessor(RTCInferenceConfig(enabled=True))
+    rtc_config = _policy_config._pytorch_config_for_inference(original, processor)  # noqa: SLF001
+
+    assert rtc_config is not original
+    assert rtc_config.model.pytorch_compile_mode is None
+    assert original.model.pytorch_compile_mode == "max-autotune"
+
+
+def test_baseline_inference_keeps_configured_torch_compile_mode():
+    original = _FakeTrainConfig(model=Pi0Config(pytorch_compile_mode="max-autotune"))
+
+    baseline_config = _policy_config._pytorch_config_for_inference(original, None)  # noqa: SLF001
+
+    assert baseline_config is original
+    assert baseline_config.model.pytorch_compile_mode == "max-autotune"
 
 
 def test_pytorch_checkpoint_loader_accepts_rtc_processor():
