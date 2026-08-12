@@ -251,6 +251,83 @@ class Policy(BasePolicy):
         }
         return outputs
 
+    def warm_up_rtc(
+        self,
+        *,
+        execution_horizon: int,
+        warmup_inferences: int,
+    ) -> list[float]:
+        """Compile baseline and RTC paths using discarded model-space inputs."""
+        if not self._is_pytorch_model:
+            raise ValueError("RTC warm-up requires a PyTorch policy")
+        if warmup_inferences < 2:
+            raise ValueError("RTC warm-up requires at least two RTC inferences")
+
+        model_config = self._model.config
+        action_horizon = int(model_config.action_horizon)
+        action_dim = int(model_config.action_dim)
+        if not 0 < execution_horizon <= action_horizon:
+            raise ValueError(
+                "RTC warm-up execution_horizon must fit the action horizon, "
+                f"got {execution_horizon} for {action_horizon}"
+            )
+
+        fake_observation = jax.tree.map(
+            lambda value: torch.as_tensor(np.asarray(value), device=self._pytorch_device),
+            model_config.fake_obs(batch_size=1),
+        )
+
+        def synchronize() -> None:
+            if str(self._pytorch_device).startswith("cuda"):
+                torch.cuda.synchronize(torch.device(self._pytorch_device))
+
+        def run(**kwargs: Any) -> tuple[torch.Tensor, float]:
+            synchronize()
+            started = time.monotonic()
+            actions = self._sample_actions(self._pytorch_device, fake_observation, **kwargs)
+            synchronize()
+            elapsed = time.monotonic() - started
+            if tuple(actions.shape) != (1, action_horizon, action_dim):
+                raise RuntimeError(
+                    "RTC warm-up returned an invalid action shape: "
+                    f"expected {(1, action_horizon, action_dim)}, got {tuple(actions.shape)}"
+                )
+            if not bool(torch.isfinite(actions).all().item()):
+                raise RuntimeError("RTC warm-up returned NaN or Inf actions")
+            return actions.detach(), elapsed
+
+        _, baseline_seconds = run()
+        timings = [baseline_seconds]
+        previous = torch.zeros(
+            (1, action_horizon, action_dim),
+            dtype=torch.float32,
+            device=self._pytorch_device,
+        )
+        for index in range(warmup_inferences):
+            delay = min(index + 1, execution_horizon)
+            valid_steps = max(1, action_horizon - index)
+            previous, elapsed = run(
+                prev_chunk_left_over=previous,
+                prev_chunk_valid_steps=torch.tensor(
+                    valid_steps,
+                    dtype=torch.int64,
+                    device=self._pytorch_device,
+                ),
+                inference_delay=torch.tensor(
+                    delay,
+                    dtype=torch.int64,
+                    device=self._pytorch_device,
+                ),
+                execution_horizon=torch.tensor(
+                    execution_horizon,
+                    dtype=torch.int64,
+                    device=self._pytorch_device,
+                ),
+            )
+            timings.append(elapsed)
+
+        return timings
+
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata

@@ -17,14 +17,50 @@ def test_rtc_client_accepts_enabled_server() -> None:
         execution_horizon=10,
         prefix_attention_schedule="exp",
         max_guidance_weight=10.0,
+        warmup_complete=True,
+        warmup_inferences=2,
     )
     validate_rtc_server_capability(
         metadata,
         rtc_requested=True,
         fixed_prefix_shape_required=True,
+        warmup_complete_required=True,
     )
     assert metadata["policy_name"] == "ur10e"
     assert metadata["openpi_server"]["rtc"]["fixed_prefix_shape"] is True
+    assert metadata["openpi_server"]["rtc"]["warmup_complete"] is True
+    assert metadata["openpi_server"]["rtc"]["warmup_inferences"] == 2
+
+
+def test_warmup_aware_client_rejects_server_without_completed_warmup() -> None:
+    metadata = add_rtc_server_capability(
+        {},
+        rtc_enabled=True,
+        execution_horizon=10,
+        prefix_attention_schedule="exp",
+        max_guidance_weight=10.0,
+    )
+
+    with pytest.raises(RuntimeError, match="completed server warm-up"):
+        validate_rtc_server_capability(
+            metadata,
+            rtc_requested=True,
+            fixed_prefix_shape_required=True,
+            warmup_complete_required=True,
+        )
+
+
+def test_server_rejects_inconsistent_completed_warmup_metadata() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        add_rtc_server_capability(
+            {},
+            rtc_enabled=True,
+            execution_horizon=10,
+            prefix_attention_schedule="exp",
+            max_guidance_weight=10.0,
+            warmup_complete=True,
+            warmup_inferences=1,
+        )
 
 
 def test_fixed_prefix_client_rejects_pre_feature_rtc_server() -> None:

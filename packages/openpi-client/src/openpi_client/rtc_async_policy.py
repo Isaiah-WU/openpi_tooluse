@@ -148,12 +148,15 @@ def _policy_worker(
                 execution_horizon=rtc_execution_horizon or 1,
                 prefix_attention_schedule="exp",
                 max_guidance_weight=10.0,
+                warmup_complete=rtc_enabled,
+                warmup_inferences=2 if rtc_enabled else None,
             )
 
         validate_rtc_server_capability(
             server_metadata,
             rtc_requested=rtc_enabled,
             fixed_prefix_shape_required=rtc_enabled,
+            warmup_complete_required=rtc_enabled,
         )
         startup_queue.put(
             {

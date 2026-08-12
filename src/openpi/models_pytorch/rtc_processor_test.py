@@ -132,6 +132,8 @@ def test_vjp_includes_denoiser_input_jacobian():
         {"prefix_attention_schedule": "invalid"},
         {"max_guidance_weight": 0.0},
         {"max_guidance_weight": math.inf},
+        {"enabled": True, "warmup_inferences": 1},
+        {"warmup_inferences": -1},
     ],
 )
 def test_config_rejects_invalid_values(config):

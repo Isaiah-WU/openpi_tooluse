@@ -117,14 +117,42 @@ def create_policy(args: Args) -> _policy.Policy:
             )
 
 
+def warm_up_policy_for_serving(
+    policy: _policy.Policy,
+    rtc_config: RTCInferenceConfig,
+) -> list[float] | None:
+    """Warm compiled RTC paths before the listening socket can be created."""
+    if not rtc_config.enabled:
+        return None
+    logging.info(
+        "Warming up baseline and %d RTC inference paths before opening the server port",
+        rtc_config.warmup_inferences,
+    )
+    timings = policy.warm_up_rtc(
+        execution_horizon=rtc_config.execution_horizon,
+        warmup_inferences=rtc_config.warmup_inferences,
+    )
+    logging.info(
+        "RTC warm-up complete (baseline=%.3fs, rtc=%s)",
+        timings[0],
+        ", ".join(f"{seconds:.3f}s" for seconds in timings[1:]),
+    )
+    return timings
+
+
 def main(args: Args) -> None:
     policy = create_policy(args)
+    warmup_timings = warm_up_policy_for_serving(policy, args.rtc)
+    warmup_complete = True if warmup_timings is not None else None
+
     policy_metadata = add_rtc_server_capability(
         policy.metadata,
         rtc_enabled=args.rtc.enabled,
         execution_horizon=args.rtc.execution_horizon,
         prefix_attention_schedule=args.rtc.prefix_attention_schedule,
         max_guidance_weight=args.rtc.max_guidance_weight,
+        warmup_complete=warmup_complete,
+        warmup_inferences=args.rtc.warmup_inferences if args.rtc.enabled else None,
     )
 
     # Record the policy's behavior.

@@ -47,6 +47,14 @@ class _FakePytorchModel:
 
     def __init__(self):
         self.sample_kwargs = None
+        self.sample_kwargs_history = []
+        self.config = SimpleNamespace(
+            action_horizon=2,
+            action_dim=3,
+            fake_obs=lambda batch_size: {
+                "state": np.zeros((batch_size, 3), dtype=np.float32),
+            },
+        )
 
     def to(self, _device):
         return self
@@ -56,7 +64,9 @@ class _FakePytorchModel:
 
     def sample_actions(self, _device, observation, **kwargs):
         self.sample_kwargs = kwargs
-        return torch.zeros(observation.state.shape[0], 2, 3)
+        self.sample_kwargs_history.append(kwargs)
+        state = observation["state"] if isinstance(observation, dict) else observation.state
+        return torch.zeros(state.shape[0], 2, 3)
 
 
 def _normalize_and_pad_prefix(data):
@@ -118,6 +128,41 @@ def test_policy_default_request_does_not_add_rtc_kwargs(monkeypatch):
     policy.infer({"state": np.array([0.0, 0.0], dtype=np.float32)})
 
     assert model.sample_kwargs == {}
+
+
+def test_policy_rtc_warmup_discards_baseline_and_varies_scalar_tensors():
+    model = _FakePytorchModel()
+    policy = _policy.Policy(
+        model,
+        is_pytorch=True,
+        pytorch_device="cpu",
+    )
+
+    timings = policy.warm_up_rtc(execution_horizon=2, warmup_inferences=2)
+
+    assert len(timings) == 3
+    assert all(seconds >= 0 for seconds in timings)
+    assert model.sample_kwargs_history[0] == {}
+    first_rtc, second_rtc = model.sample_kwargs_history[1:]
+    assert first_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
+    assert second_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
+    torch.testing.assert_close(first_rtc["inference_delay"], torch.tensor(1))
+    torch.testing.assert_close(second_rtc["inference_delay"], torch.tensor(2))
+    torch.testing.assert_close(first_rtc["prev_chunk_valid_steps"], torch.tensor(2))
+    torch.testing.assert_close(second_rtc["prev_chunk_valid_steps"], torch.tensor(1))
+
+
+def test_policy_rtc_warmup_rejects_invalid_configuration():
+    policy = _policy.Policy(
+        _FakePytorchModel(),
+        is_pytorch=True,
+        pytorch_device="cpu",
+    )
+
+    with pytest.raises(ValueError, match="at least two"):
+        policy.warm_up_rtc(execution_horizon=2, warmup_inferences=1)
+    with pytest.raises(ValueError, match="fit the action horizon"):
+        policy.warm_up_rtc(execution_horizon=3, warmup_inferences=2)
 
 
 class _FakeWebsocket:

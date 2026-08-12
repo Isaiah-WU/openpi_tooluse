@@ -37,6 +37,7 @@ class RTCInferenceConfig:
     execution_horizon: int = 10
     prefix_attention_schedule: PrefixAttentionSchedule = "exp"
     max_guidance_weight: float = 10.0
+    warmup_inferences: int = 2
 
     def __post_init__(self) -> None:
         if self.execution_horizon <= 0:
@@ -45,6 +46,12 @@ class RTCInferenceConfig:
             raise ValueError(f"invalid prefix_attention_schedule: {self.prefix_attention_schedule}")
         if not math.isfinite(self.max_guidance_weight) or self.max_guidance_weight <= 0:
             raise ValueError(f"max_guidance_weight must be finite and positive, got {self.max_guidance_weight}")
+        if isinstance(self.warmup_inferences, bool) or not isinstance(self.warmup_inferences, int):
+            raise ValueError("warmup_inferences must be an integer")
+        if self.enabled and self.warmup_inferences < 2:
+            raise ValueError("enabled RTC requires at least two warmup inferences")
+        if self.warmup_inferences < 0:
+            raise ValueError("warmup_inferences must be non-negative")
 
 
 class RTCProcessor:
