@@ -278,7 +278,11 @@ class Policy(BasePolicy):
         )
         fake_observation = _model.Observation(
             images={
-                key: image.permute(0, 3, 1, 2).contiguous()
+                # Match Observation.from_dict() for real uint8 requests: it
+                # converts NHWC images to a non-contiguous NCHW view. Tensor
+                # stride is part of torch.compile's input contract, so forcing
+                # contiguous storage here would warm a different graph.
+                key: image.permute(0, 3, 1, 2)
                 if image.ndim == 4 and image.shape[-1] == 3
                 else image
                 for key, image in fake_observation.images.items()

@@ -150,7 +150,9 @@ def test_policy_rtc_warmup_discards_baseline_and_varies_scalar_tensors():
     assert len(timings) == 3
     assert all(seconds >= 0 for seconds in timings)
     assert model.sample_kwargs_history[0] == {}
-    assert model.sample_observations[0].images["base_0_rgb"].shape == (1, 3, 4, 5)
+    warmup_image = model.sample_observations[0].images["base_0_rgb"]
+    assert warmup_image.shape == (1, 3, 4, 5)
+    assert not warmup_image.is_contiguous()
     first_rtc, second_rtc = model.sample_kwargs_history[1:]
     assert first_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
     assert second_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
