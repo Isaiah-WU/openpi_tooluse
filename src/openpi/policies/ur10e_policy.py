@@ -7,6 +7,29 @@ from openpi import transforms
 from openpi.models import model as _model
 
 
+LONG_HORIZON_PROMPT = (
+    "Pick up the yellow cup at the back and place it into the blue cup in the front. "
+    "Lift the nested cups and place them into the blue cup inside the basket. "
+    "Pick up the blue plate at the back and place it onto the blue plate in the front. "
+    "Lift the stacked plates and place them onto the blue plate inside the basket. "
+    "Take the rag and wipe the table."
+)
+RTC_WARMUP_INITIAL_VALID_STEPS = 14
+RTC_WARMUP_INFERENCE_DELAY = 3
+RTC_WARMUP_EXECUTION_HORIZON = 10
+RTC_WARMUP_ACTION_DIM = 7
+
+
+def make_ur10e_rtc_warmup_observation() -> dict:
+    """Build a deterministic raw observation matching the deployed UR10e API."""
+    return {
+        "observation/state": np.zeros(7, dtype=np.float32),
+        "observation/image": np.zeros((224, 224, 3), dtype=np.uint8),
+        "observation/wrist_image": np.zeros((224, 224, 3), dtype=np.uint8),
+        "prompt": LONG_HORIZON_PROMPT,
+    }
+
+
 def make_ur10e_example() -> dict:
     return {
         "observation/state": np.random.rand(7),  # 6 个关节角度 + 1 个夹爪开合状态

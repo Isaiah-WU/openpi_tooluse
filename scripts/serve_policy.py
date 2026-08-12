@@ -9,6 +9,7 @@ from openpi_client.server_capabilities import add_rtc_server_capability
 from openpi.models_pytorch.rtc_processor import RTCInferenceConfig
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
+from openpi.policies import ur10e_policy
 from openpi.serving import websocket_policy_server
 from openpi.training import config as _config
 
@@ -120,17 +121,25 @@ def create_policy(args: Args) -> _policy.Policy:
 def warm_up_policy_for_serving(
     policy: _policy.Policy,
     rtc_config: RTCInferenceConfig,
+    *,
+    raw_observation: dict | None = None,
 ) -> list[float] | None:
     """Warm compiled RTC paths before the listening socket can be created."""
     if not rtc_config.enabled:
         return None
+    if raw_observation is None:
+        raise ValueError("RTC serving requires a deployment-specific warm-up observation")
     logging.info(
         "Warming up baseline and %d RTC inference paths before opening the server port",
         rtc_config.warmup_inferences,
     )
     timings = policy.warm_up_rtc(
-        execution_horizon=rtc_config.execution_horizon,
+        raw_observation=raw_observation,
+        execution_horizon=ur10e_policy.RTC_WARMUP_EXECUTION_HORIZON,
         warmup_inferences=rtc_config.warmup_inferences,
+        prev_chunk_valid_steps=ur10e_policy.RTC_WARMUP_INITIAL_VALID_STEPS,
+        inference_delay=ur10e_policy.RTC_WARMUP_INFERENCE_DELAY,
+        expected_action_dim=ur10e_policy.RTC_WARMUP_ACTION_DIM,
     )
     logging.info(
         "RTC warm-up complete (baseline=%.3fs, rtc=%s)",
@@ -142,7 +151,16 @@ def warm_up_policy_for_serving(
 
 def main(args: Args) -> None:
     policy = create_policy(args)
-    warmup_timings = warm_up_policy_for_serving(policy, args.rtc)
+    warmup_observation = None
+    if args.rtc.enabled and isinstance(args.policy, Checkpoint):
+        train_config = _config.get_config(args.policy.config)
+        if isinstance(train_config.data, _config.LeRobotUR10eDataConfig):
+            warmup_observation = ur10e_policy.make_ur10e_rtc_warmup_observation()
+    warmup_timings = warm_up_policy_for_serving(
+        policy,
+        args.rtc,
+        raw_observation=warmup_observation,
+    )
     warmup_complete = True if warmup_timings is not None else None
 
     policy_metadata = add_rtc_server_capability(

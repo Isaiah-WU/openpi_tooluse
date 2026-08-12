@@ -43,8 +43,6 @@ def test_pytorch_checkpoint_loader_accepts_rtc_processor():
 
 
 class _FakePytorchModel:
-    action_horizon = 2
-
     def __init__(self):
         self.sample_kwargs = None
         self.sample_kwargs_history = []
@@ -137,29 +135,47 @@ def test_policy_default_request_does_not_add_rtc_kwargs(monkeypatch):
     assert model.sample_kwargs == {}
 
 
-def test_policy_rtc_warmup_discards_baseline_and_varies_scalar_tensors():
+def test_policy_rtc_warmup_uses_public_infer_and_recursively_returns_chunks(monkeypatch):
     model = _FakePytorchModel()
     policy = _policy.Policy(
         model,
         is_pytorch=True,
         pytorch_device="cpu",
     )
+    calls = []
+    returned_actions = [
+        np.full((2, 3), value, dtype=np.float32)
+        for value in (1, 2, 3)
+    ]
 
-    timings = policy.warm_up_rtc(execution_horizon=2, warmup_inferences=2)
+    def fake_infer(observation, **kwargs):
+        calls.append((observation, kwargs))
+        return {"actions": returned_actions[len(calls) - 1]}
+
+    monkeypatch.setattr(policy, "infer", fake_infer)
+    raw_observation = {"raw": np.array([1], dtype=np.float32)}
+
+    timings = policy.warm_up_rtc(
+        raw_observation=raw_observation,
+        execution_horizon=2,
+        warmup_inferences=2,
+        prev_chunk_valid_steps=2,
+        inference_delay=1,
+        expected_action_dim=3,
+    )
 
     assert len(timings) == 3
     assert all(seconds >= 0 for seconds in timings)
-    assert model.sample_kwargs_history[0] == {}
-    warmup_image = model.sample_observations[0].images["base_0_rgb"]
-    assert warmup_image.shape == (1, 3, 4, 5)
-    assert not warmup_image.is_contiguous()
-    first_rtc, second_rtc = model.sample_kwargs_history[1:]
-    assert first_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
-    assert second_rtc["prev_chunk_left_over"].shape == (1, 2, 3)
-    torch.testing.assert_close(first_rtc["inference_delay"], torch.tensor(1))
-    torch.testing.assert_close(second_rtc["inference_delay"], torch.tensor(2))
-    torch.testing.assert_close(first_rtc["prev_chunk_valid_steps"], torch.tensor(2))
-    torch.testing.assert_close(second_rtc["prev_chunk_valid_steps"], torch.tensor(1))
+    assert all(observation is raw_observation for observation, _ in calls)
+    assert calls[0][1] == {}
+    first_rtc, second_rtc = calls[1][1], calls[2][1]
+    assert first_rtc["prev_chunk_left_over"] is returned_actions[0]
+    assert second_rtc["prev_chunk_left_over"] is returned_actions[1]
+    assert first_rtc["inference_delay"] == 1
+    assert second_rtc["inference_delay"] == 1
+    assert first_rtc["prev_chunk_valid_steps"] == 2
+    assert second_rtc["prev_chunk_valid_steps"] == 2
+    assert all("noise" not in kwargs for _, kwargs in calls)
 
 
 def test_policy_rtc_warmup_rejects_invalid_configuration():
@@ -170,9 +186,40 @@ def test_policy_rtc_warmup_rejects_invalid_configuration():
     )
 
     with pytest.raises(ValueError, match="at least two"):
-        policy.warm_up_rtc(execution_horizon=2, warmup_inferences=1)
+        policy.warm_up_rtc(
+            raw_observation={}, execution_horizon=2, warmup_inferences=1, prev_chunk_valid_steps=2,
+            inference_delay=1, expected_action_dim=3
+        )
     with pytest.raises(ValueError, match="fit the action horizon"):
-        policy.warm_up_rtc(execution_horizon=3, warmup_inferences=2)
+        policy.warm_up_rtc(
+            raw_observation={}, execution_horizon=3, warmup_inferences=2, prev_chunk_valid_steps=2,
+            inference_delay=1, expected_action_dim=3
+        )
+
+
+def test_policy_rtc_warmup_rejects_invalid_action_shape(monkeypatch):
+    policy = _policy.Policy(
+        _FakePytorchModel(),
+        is_pytorch=True,
+        pytorch_device="cpu",
+    )
+    results = iter(
+        [
+            {"actions": np.zeros((2, 3), dtype=np.float32)},
+            {"actions": np.zeros((2, 2), dtype=np.float32)},
+        ]
+    )
+    monkeypatch.setattr(policy, "infer", lambda _observation, **_kwargs: next(results))
+
+    with pytest.raises(RuntimeError, match="invalid action shape"):
+        policy.warm_up_rtc(
+            raw_observation={},
+            execution_horizon=2,
+            warmup_inferences=2,
+            prev_chunk_valid_steps=2,
+            inference_delay=1,
+            expected_action_dim=3,
+        )
 
 
 class _FakeWebsocket:
