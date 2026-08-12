@@ -125,8 +125,18 @@ class RMSNorm(nn.Module):
             return normed_inputs.astype(dtype), None  # return in original dtype
 
         # adaptive RMSNorm
+        # `cond` is either one conditioning vector per batch element, shape `[b, d]` (the
+        # original behavior: every token in `x` gets the same scale/shift/gate -- e.g. one
+        # flow-matching timestep shared by the whole action chunk), or one conditioning
+        # vector per *token*, shape `[b, t, d]` (used for training-time RTC, where prefix
+        # and postfix action steps carry different timesteps and so need different
+        # modulation). `nn.Dense` applies independently over any leading dims, so this
+        # works either way -- we only need to decide whether to broadcast a single vector
+        # over the token axis, or leave an already-per-token modulation alone.
         modulation = nn.Dense(x.shape[-1] * 3, kernel_init=nn.initializers.zeros, dtype=dtype)(cond)
-        scale, shift, gate = jnp.split(modulation[:, None, :], 3, axis=-1)
+        if modulation.ndim == x.ndim - 1:
+            modulation = modulation[:, None, :]  # broadcast the single vector over tokens
+        scale, shift, gate = jnp.split(modulation, 3, axis=-1)
         normed_inputs = normed_inputs * (1 + scale) + shift  # scale and shift in float32
         return normed_inputs.astype(dtype), gate
 

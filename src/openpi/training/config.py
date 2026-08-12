@@ -797,7 +797,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
         image_log_interval=1500,
-        batch_size=32,      
+        batch_size=32,
         assets_base_dir="/media/wbjsamuel/data/pi05_long_horizon_task/stats",
         checkpoint_base_dir="/media/wbjsamuel/data/pi05_long_horizon_task/checkpoints",
         freeze_filter=pi0_config.Pi0Config(
@@ -805,6 +805,67 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             max_token_len=256,
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    #
+    # 方案 A: training-time RTC retrofit on top of the existing pi05_ur10e_long_horizon_lora
+    # run (arXiv 2512.05964). Resumes from the finished 29999-step checkpoint of that config
+    # instead of the pi05 base -- the task itself is already learned; this short continued
+    # fine-tune only needs to teach the model to condition on a pinned action prefix.
+    #
+    # TODO before launching: fill in <EXP_NAME> below with the exp_name that
+    # pi05_ur10e_long_horizon_lora's 29999 checkpoint was actually saved under
+    # (./checkpoints/pi05_ur10e_long_horizon_lora/<EXP_NAME>/29999 under the checkpoint_base_dir
+    # above -- this can't be inferred from the config alone).
+    #
+    TrainConfig(
+        name="pi05_ur10e_long_horizon_lora_ttrtc",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            max_token_len=256,
+            # Starting point borrowed from the paper's real-world (50Hz, Unif[0,10)) setup --
+            # not from our own measured inference delay, since the inference-time RTC dry-run
+            # was never gotten working long enough to log real numbers. Comfortably inside the
+            # d <= action_horizon - execution_horizon = 40 hard limit either way. Revisit once
+            # gello's dry-run is actually producing delay measurements.
+            train_time_rtc_max_delay=10,
+            # See Pi0Config.train_time_rtc_unfreeze_adarms: keeps the action expert's adaRMS
+            # modulation trainable so this short retrofit can actually learn to use the
+            # prefix, instead of leaving that layer stuck at its pretrained values. Set to
+            # False to A/B against leaving it frozen if this run underperforms.
+            train_time_rtc_unfreeze_adarms=True,
+        ),
+        data=LeRobotUR10eDataConfig(
+            repo_id="wbjsamuel/ur10e_long_horizon",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/media/wbjsamuel/data/pi05_long_horizon_task/checkpoints/"
+            "pi05_ur10e_long_horizon_lora/<EXP_NAME>/29999/params"
+        ),
+        # Conservative starting budget: ~10% of the 29999 steps already spent on this
+        # checkpoint (see the plan discussion -- there's no established ratio for retrofitting
+        # a LoRA VLA checkpoint, unlike the paper's own resume experiment which used a toy
+        # model). Watch the postfix-only loss curve and extend (raise this and re-launch with
+        # `resume=True`) if it hasn't leveled off.
+        num_train_steps=3_000,
+        batch_size=32,
+        image_log_interval=500,
+        save_interval=500,
+        keep_period=1500,
+        assets_base_dir="/media/wbjsamuel/data/pi05_long_horizon_task/stats",
+        checkpoint_base_dir="/media/wbjsamuel/data/pi05_long_horizon_task/checkpoints",
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            max_token_len=256,
+            train_time_rtc_max_delay=10,
+            train_time_rtc_unfreeze_adarms=True,
         ).get_freeze_filter(),
         ema_decay=None,
     ),
