@@ -81,12 +81,13 @@ class RTCProcessor:
             minimum=0,
             maximum=action_horizon,
         )
-        torch._assert(inference_delay >= 0, "inference_delay must be non-negative")
-        torch._assert(execution_horizon >= 0, "execution_horizon must be non-negative")
-        torch._assert(
-            execution_horizon <= action_horizon,
-            "execution_horizon cannot exceed action_horizon",
-        )
+        # Policy.infer validates the public integer inputs before converting
+        # them to tensors. Keep this compiled path free of tensor-valued Python
+        # assertions: PyTorch 2.7 lowers those through _local_scalar_dense and
+        # breaks full-graph compilation. Clamping is a branch-free safeguard
+        # for direct tensor callers and is a no-op for validated requests.
+        inference_delay = inference_delay.clamp(min=0)
+        execution_horizon = execution_horizon.clamp(min=0, max=action_horizon)
 
         start = torch.minimum(inference_delay, execution_horizon)
         indices = torch.arange(action_horizon, device=device, dtype=dtype)
@@ -129,7 +130,7 @@ class RTCProcessor:
         local_time = torch.as_tensor(time, device=x_t.device, dtype=x_t.dtype)
         if local_time.numel() != 1:
             raise ValueError(f"time must be scalar, got shape {tuple(local_time.shape)}")
-        torch._assert((local_time >= 0.0) & (local_time <= 1.0), "time must be in [0, 1]")
+        local_time = local_time.clamp(0.0, 1.0)
 
         action_horizon = x_t.shape[1]
         prefix_length = previous_chunk_leftover.shape[1]
@@ -140,11 +141,7 @@ class RTCProcessor:
             minimum=0,
             maximum=prefix_length,
         )
-        torch._assert(valid_steps >= 0, "previous_chunk_valid_steps must be non-negative")
-        torch._assert(
-            valid_steps <= prefix_length,
-            "previous_chunk_valid_steps cannot exceed the prefix tensor length",
-        )
+        valid_steps = valid_steps.clamp(min=0, max=prefix_length)
         requested_horizon = self.config.execution_horizon if execution_horizon is None else execution_horizon
         requested_horizon = self._as_step_tensor(
             requested_horizon,
@@ -152,8 +149,8 @@ class RTCProcessor:
             device=x_t.device,
             minimum=1,
         )
-        torch._assert(requested_horizon > 0, "execution_horizon must be positive")
-        effective_horizon = torch.minimum(requested_horizon, valid_steps).clamp(max=action_horizon)
+        requested_horizon = requested_horizon.clamp(min=1, max=action_horizon)
+        effective_horizon = torch.minimum(requested_horizon, valid_steps)
 
         previous_chunk = torch.zeros_like(x_t)
         previous_chunk[:, :prefix_length] = previous_chunk_leftover.to(device=x_t.device, dtype=x_t.dtype)
