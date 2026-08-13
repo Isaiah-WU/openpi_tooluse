@@ -402,7 +402,10 @@ class Module(nn.Module):
         embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
         positions: at.Int[at.Array, "b t"],
         mask: at.Bool[at.Array, "b t s"],
-        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,
+        # per-chunk (one timestep for the whole action horizon, the original behavior) or
+        # per-token (training-time RTC, arXiv 2512.05964 -- a pinned prefix + actively-denoised
+        # postfix need different timesteps within the same chunk) adaRMS conditioning.
+        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | at.Float[at.Array, "b _t _d"] | None] | None = None,
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,

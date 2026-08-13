@@ -814,10 +814,9 @@ _CONFIGS = [
     # instead of the pi05 base -- the task itself is already learned; this short continued
     # fine-tune only needs to teach the model to condition on a pinned action prefix.
     #
-    # TODO before launching: fill in <EXP_NAME> below with the exp_name that
-    # pi05_ur10e_long_horizon_lora's 29999 checkpoint was actually saved under
-    # (./checkpoints/pi05_ur10e_long_horizon_lora/<EXP_NAME>/29999 under the checkpoint_base_dir
-    # above -- this can't be inferred from the config alone).
+    # weight_loader below points at exp_name "first_train" -- the actual run dir under
+    # pi05_ur10e_long_horizon_lora/ on the GPU box's checkpoint_base_dir (confirmed via
+    # `ls checkpoints/pi05_ur10e_long_horizon_lora/`). Update if that checkpoint ever moves.
     #
     TrainConfig(
         name="pi05_ur10e_long_horizon_lora_ttrtc",
@@ -845,7 +844,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/media/wbjsamuel/data/pi05_long_horizon_task/checkpoints/"
-            "pi05_ur10e_long_horizon_lora/<EXP_NAME>/29999/params"
+            "pi05_ur10e_long_horizon_lora/first_train/29999/params"
         ),
         # Conservative starting budget: ~10% of the 29999 steps already spent on this
         # checkpoint (see the plan discussion -- there's no established ratio for retrofitting
