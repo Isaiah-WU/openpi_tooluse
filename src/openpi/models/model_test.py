@@ -1,3 +1,5 @@
+import gc
+
 from flax import nnx
 import jax
 import numpy as np
@@ -46,18 +48,29 @@ def test_pi0_train_time_rtc_delay_zero_matches_baseline():
     original, non-RTC behavior: no prefix, every step denoised the same as before. This is the
     regression guard for the architecture change (per-token timestep plumbing) -- if this
     fails, the refactor changed behavior for models that aren't even using training-time RTC.
-    """
-    key = jax.random.key(0)
-    baseline_model = pi0_config.Pi0Config(pi05=True).create(key)
-    rtc_model = pi0_config.Pi0Config(pi05=True, train_time_rtc_max_delay=1).create(key)
 
+    The two full pi0.5 models are built and torn down one at a time rather than held resident
+    together: each one's `lax.scan` over the transformer stack allocates a multi-GiB contiguous
+    buffer, and two of those alive simultaneously can exceed what's free on a shared/constrained
+    GPU even though neither model alone is anywhere near the limit. Both are still created from
+    the same `jax.random.key(0)`, so they get identical initial parameters and stay directly
+    comparable despite not overlapping in time.
+    """
     batch_size = 2
     config = pi0_config.Pi0Config(pi05=True)
     obs, act = config.fake_obs(batch_size), config.fake_act(batch_size)
     loss_key = jax.random.key(1)
 
-    baseline_loss = nnx_utils.module_jit(baseline_model.compute_loss)(loss_key, obs, act)
-    rtc_loss = nnx_utils.module_jit(rtc_model.compute_loss)(loss_key, obs, act)
+    baseline_model = pi0_config.Pi0Config(pi05=True).create(jax.random.key(0))
+    baseline_loss = jax.device_get(nnx_utils.module_jit(baseline_model.compute_loss)(loss_key, obs, act))
+    del baseline_model
+    gc.collect()
+
+    rtc_model = pi0_config.Pi0Config(pi05=True, train_time_rtc_max_delay=1).create(jax.random.key(0))
+    rtc_loss = jax.device_get(nnx_utils.module_jit(rtc_model.compute_loss)(loss_key, obs, act))
+    del rtc_model
+    gc.collect()
+
     assert baseline_loss.shape == rtc_loss.shape == (batch_size, config.action_horizon)
     np.testing.assert_allclose(rtc_loss, baseline_loss, rtol=1e-4, atol=1e-5)
 
